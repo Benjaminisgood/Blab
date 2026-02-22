@@ -1,18 +1,1 @@
-//
-//  Item.swift
-//  Blab
-//
-//  Created by ben on 2026/2/22.
-//
-
-import Foundation
-import SwiftData
-
-@Model
-final class Item {
-    var timestamp: Date
-    
-    init(timestamp: Date) {
-        self.timestamp = timestamp
-    }
-}
+// Legacy template placeholder kept intentionally to avoid destructive file removal in automated workflow.

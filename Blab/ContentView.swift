@@ -1,53 +1,64 @@
-//
-//  ContentView.swift
-//  Blab
-//
-//  Created by ben on 2026/2/22.
-//
-
 import SwiftUI
 import SwiftData
 
 struct ContentView: View {
     @Environment(\.modelContext) private var modelContext
-    @Query private var items: [Item]
+    @Query(sort: [SortDescriptor(\Member.name), SortDescriptor(\Member.username)]) private var members: [Member]
+
+    @AppStorage("benlab.currentMemberID") private var currentMemberID: String = ""
+
+    @State private var selectedSection: SidebarSection? = .dashboard
+
+    private var currentMember: Member? {
+        members.first(where: { $0.id.uuidString == currentMemberID }) ?? members.first
+    }
 
     var body: some View {
         NavigationSplitView {
-            List {
-                ForEach(items) { item in
-                    NavigationLink {
-                        Text("Item at \(item.timestamp, format: Date.FormatStyle(date: .numeric, time: .standard))")
-                    } label: {
-                        Text(item.timestamp, format: Date.FormatStyle(date: .numeric, time: .standard))
-                    }
-                }
-                .onDelete(perform: deleteItems)
+            List(SidebarSection.allCases, selection: $selectedSection) { section in
+                Label(section.title, systemImage: section.systemImage)
+                    .tag(section)
             }
-            .navigationSplitViewColumnWidth(min: 180, ideal: 200)
-            .toolbar {
-                ToolbarItem {
-                    Button(action: addItem) {
-                        Label("Add Item", systemImage: "plus")
-                    }
+            .navigationTitle("Benlab")
+            .safeAreaInset(edge: .bottom) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Divider()
+                    Text(currentMember?.displayName ?? "未选择成员")
+                        .font(.subheadline.weight(.semibold))
+                    Text(currentMember?.username.isEmpty == false ? "@\(currentMember!.username)" : "")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 10)
             }
         } detail: {
-            Text("Select an item")
+            Group {
+                switch selectedSection ?? .dashboard {
+                case .dashboard:
+                    DashboardSectionView(currentMember: currentMember)
+                case .events:
+                    EventsSectionView(currentMember: currentMember)
+                case .items:
+                    ItemsSectionView(currentMember: currentMember)
+                case .locations:
+                    LocationsSectionView(currentMember: currentMember)
+                case .members:
+                    MembersSectionView(currentMember: currentMember)
+                case .logs:
+                    LogsSectionView()
+                case .settings:
+                    SettingsSectionView(currentMemberID: $currentMemberID)
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(.background)
         }
-    }
-
-    private func addItem() {
-        withAnimation {
-            let newItem = Item(timestamp: Date())
-            modelContext.insert(newItem)
-        }
-    }
-
-    private func deleteItems(offsets: IndexSet) {
-        withAnimation {
-            for index in offsets {
-                modelContext.delete(items[index])
+        .task {
+            SeedDataService.bootstrapIfNeeded(context: modelContext)
+            if members.first(where: { $0.id.uuidString == currentMemberID }) == nil,
+               let firstMember = members.first {
+                currentMemberID = firstMember.id.uuidString
             }
         }
     }
@@ -55,5 +66,16 @@ struct ContentView: View {
 
 #Preview {
     ContentView()
-        .modelContainer(for: Item.self, inMemory: true)
+        .modelContainer(for: [
+            Member.self,
+            MemberFollow.self,
+            LabItem.self,
+            LabLocation.self,
+            EventParticipant.self,
+            LabEvent.self,
+            LabAttachment.self,
+            LabLog.self,
+            LabMessage.self,
+            AISettings.self
+        ], inMemory: true)
 }

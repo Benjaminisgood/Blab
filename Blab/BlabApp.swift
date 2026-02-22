@@ -1,25 +1,32 @@
-//
-//  BlabApp.swift
-//  Blab
-//
-//  Created by ben on 2026/2/22.
-//
-
 import SwiftUI
 import SwiftData
 
 @main
 struct BlabApp: App {
-    var sharedModelContainer: ModelContainer = {
+    private var sharedModelContainer: ModelContainer = {
         let schema = Schema([
-            Item.self,
+            Member.self,
+            MemberFollow.self,
+            LabItem.self,
+            LabLocation.self,
+            EventParticipant.self,
+            LabEvent.self,
+            LabAttachment.self,
+            LabLog.self,
+            LabMessage.self,
+            AISettings.self
         ])
-        let modelConfiguration = ModelConfiguration(schema: schema, isStoredInMemoryOnly: false)
+
+        let configuration = ModelConfiguration(
+            schema: schema,
+            isStoredInMemoryOnly: false,
+            allowsSave: true
+        )
 
         do {
-            return try ModelContainer(for: schema, configurations: [modelConfiguration])
+            return try ModelContainer(for: schema, configurations: [configuration])
         } catch {
-            fatalError("Could not create ModelContainer: \(error)")
+            fatalError("Failed to create SwiftData container: \(error)")
         }
     }()
 
@@ -28,5 +35,8 @@ struct BlabApp: App {
             ContentView()
         }
         .modelContainer(sharedModelContainer)
+        .commands {
+            SidebarCommands()
+        }
     }
 }
