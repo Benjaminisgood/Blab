@@ -109,8 +109,8 @@ struct MembersSectionView: View {
                                     allItems: items,
                                     allLocations: locations,
                                     allEvents: events,
-                                    onDelete: {
-                                        deletingMember = member
+                                    onDeleteConfirmed: {
+                                        deleteMember(member)
                                     },
                                     onToggleFollow: {
                                         toggleFollow(member)
@@ -206,9 +206,17 @@ struct MembersSectionView: View {
 
     private func performDelete() {
         guard let member = deletingMember else { return }
+        _ = deleteMember(member)
+        deletingMember = nil
+    }
+
+    @discardableResult
+    private func deleteMember(_ member: Member) -> Bool {
         if member.id == currentMember?.id {
-            deletingMember = nil
-            return
+            if deletingMember?.id == member.id {
+                deletingMember = nil
+            }
+            return false
         }
 
         let oldPhoto = member.photoRef
@@ -220,9 +228,13 @@ struct MembersSectionView: View {
             }
         } catch {
             assertionFailure("Delete member failed: \(error)")
+            return false
         }
 
-        deletingMember = nil
+        if deletingMember?.id == member.id {
+            deletingMember = nil
+        }
+        return true
     }
 }
 
@@ -268,6 +280,7 @@ private struct MemberRowView: View {
 }
 
 private struct MemberDetailView: View {
+    @Environment(\.dismiss) private var dismiss
     @Environment(\.modelContext) private var modelContext
 
     let member: Member
@@ -275,10 +288,11 @@ private struct MemberDetailView: View {
     let allItems: [LabItem]
     let allLocations: [LabLocation]
     let allEvents: [LabEvent]
-    let onDelete: () -> Void
+    let onDeleteConfirmed: () -> Bool
     let onToggleFollow: () -> Void
 
     @State private var showingEditor = false
+    @State private var showingDeleteConfirmation = false
 
     private var isSelf: Bool {
         member.id == currentMember?.id
@@ -362,7 +376,7 @@ private struct MemberDetailView: View {
 
                             if !isSelf {
                                 Button("删除", role: .destructive) {
-                                    onDelete()
+                                    showingDeleteConfirmation = true
                                 }
                                 .buttonStyle(.bordered)
                             }
@@ -457,6 +471,16 @@ private struct MemberDetailView: View {
                 }
             }
             .padding(20)
+        }
+        .confirmationDialog("确认删除成员", isPresented: $showingDeleteConfirmation, titleVisibility: .visible) {
+            Button("删除", role: .destructive) {
+                if onDeleteConfirmed() {
+                    dismiss()
+                }
+            }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("删除成员将同时移除其关注关系和参与记录。")
         }
         .sheet(isPresented: $showingEditor) {
             MemberEditorSheet(

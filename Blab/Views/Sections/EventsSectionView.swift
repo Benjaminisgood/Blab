@@ -110,8 +110,8 @@ struct EventsSectionView: View {
                                         members: members,
                                         items: items,
                                         locations: locations,
-                                        onDelete: {
-                                            deletingEvent = event
+                                        onDeleteConfirmed: {
+                                            deleteEvent(event)
                                         }
                                     )
                                 } label: {
@@ -148,8 +148,8 @@ struct EventsSectionView: View {
                                         members: members,
                                         items: items,
                                         locations: locations,
-                                        onDelete: {
-                                            deletingEvent = event
+                                        onDeleteConfirmed: {
+                                            deleteEvent(event)
                                         }
                                     )
                                 } label: {
@@ -212,9 +212,17 @@ struct EventsSectionView: View {
 
     private func performDelete() {
         guard let event = deletingEvent else { return }
+        _ = deleteEvent(event)
+        deletingEvent = nil
+    }
+
+    @discardableResult
+    private func deleteEvent(_ event: LabEvent) -> Bool {
         guard event.owner?.id == currentMember?.id else {
-            deletingEvent = nil
-            return
+            if deletingEvent?.id == event.id {
+                deletingEvent = nil
+            }
+            return false
         }
 
         let refs = event.attachmentRefs
@@ -227,9 +235,13 @@ struct EventsSectionView: View {
             refs.forEach { AttachmentStore.deleteManagedFile(ref: $0) }
         } catch {
             assertionFailure("Delete event failed: \(error)")
+            return false
         }
 
-        deletingEvent = nil
+        if deletingEvent?.id == event.id {
+            deletingEvent = nil
+        }
+        return true
     }
 }
 
@@ -278,6 +290,7 @@ private struct EventRowView: View {
 }
 
 private struct EventDetailView: View {
+    @Environment(\.dismiss) private var dismiss
     @Environment(\.modelContext) private var modelContext
 
     let event: LabEvent
@@ -285,10 +298,11 @@ private struct EventDetailView: View {
     let members: [Member]
     let items: [LabItem]
     let locations: [LabLocation]
-    let onDelete: () -> Void
+    let onDeleteConfirmed: () -> Bool
 
     @State private var showingJoinFailed = false
     @State private var showingEditor = false
+    @State private var showingDeleteConfirmation = false
 
     var body: some View {
         ScrollView {
@@ -310,7 +324,7 @@ private struct EventDetailView: View {
 
                     if event.owner?.id == currentMember?.id {
                         Button("删除", role: .destructive) {
-                            onDelete()
+                            showingDeleteConfirmation = true
                         }
                         .buttonStyle(.bordered)
                     }
@@ -366,6 +380,16 @@ private struct EventDetailView: View {
                 }
             }
             .padding(20)
+        }
+        .confirmationDialog("确认删除事项", isPresented: $showingDeleteConfirmation, titleVisibility: .visible) {
+            Button("删除", role: .destructive) {
+                if onDeleteConfirmed() {
+                    dismiss()
+                }
+            }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("删除后会移除事项及附件记录。")
         }
         .alert("操作失败", isPresented: $showingJoinFailed) {
             Button("确定", role: .cancel) {}
