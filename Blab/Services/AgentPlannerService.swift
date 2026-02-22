@@ -379,7 +379,7 @@ enum AgentPlannerService {
         let contextJSON = contextJSONString(context)
 
         return """
-你是 Benlab 的数据录入 Agent，负责把用户自然语言转换为结构化执行计划。
+你是 Blab 的数据录入 Agent，负责把用户自然语言转换为结构化执行计划。
 当前时间：\(nowToken)
 
 输出要求（必须遵守）：

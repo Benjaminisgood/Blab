@@ -5,7 +5,7 @@ struct ContentView: View {
     @Environment(\.modelContext) private var modelContext
     @Query(sort: [SortDescriptor(\Member.name), SortDescriptor(\Member.username)]) private var members: [Member]
 
-    @AppStorage("benlab.currentMemberID") private var currentMemberID: String = ""
+    @AppStorage("blab.currentMemberID") private var currentMemberID: String = ""
 
     @State private var selectedSection: SidebarSection? = .dashboard
 

@@ -1,7 +1,7 @@
 import Foundation
 
 struct AttachmentStore {
-    static let containerFolder = "Benlab"
+    static let containerFolder = "Blab"
     static let attachmentsFolder = "attachments"
 
     static func appSupportDirectory() throws -> URL {

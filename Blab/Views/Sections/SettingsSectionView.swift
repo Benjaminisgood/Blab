@@ -9,7 +9,7 @@ struct SettingsSectionView: View {
 
     @Binding var currentMemberID: String
 
-    @State private var aiTestPrompt = "请用一句话介绍 Benlab 的用途。"
+    @State private var aiTestPrompt = "请用一句话介绍 Blab 的用途。"
     @State private var aiTestResult = ""
     @State private var isTestingAI = false
 

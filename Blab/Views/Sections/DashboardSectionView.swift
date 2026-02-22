@@ -154,7 +154,7 @@ private struct DashboardHeroCard: View {
                 .clipShape(RoundedRectangle(cornerRadius: 12))
 
             VStack(alignment: .leading, spacing: 4) {
-                Text("Benlab 控制台")
+                Text("Blab 控制台")
                     .font(.title2.weight(.bold))
                 Text("当前成员：\(currentMemberName)")
                     .foregroundStyle(.secondary)

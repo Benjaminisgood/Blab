@@ -17,7 +17,7 @@ enum SeedDataService {
                     contact: "admin@example.com",
                     notesRaw: DomainCodec.serializeProfileMetadata(
                         ProfileMetadata(
-                            bio: "欢迎来到 Benlab 原生版。",
+                            bio: "欢迎来到 Blab 原生版。",
                             socialLinks: [],
                             locationRelations: [],
                             itemRelations: [],
