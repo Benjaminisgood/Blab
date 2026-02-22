@@ -19,10 +19,19 @@ struct ContentView: View {
                 Label(section.title, systemImage: section.systemImage)
                     .tag(section)
             }
-            .navigationTitle("Benlab")
+            .navigationTitle("Blab")
             .safeAreaInset(edge: .bottom) {
                 VStack(alignment: .leading, spacing: 4) {
                     Divider()
+                    HStack(spacing: 8) {
+                        Image("BrandLogo")
+                            .resizable()
+                            .interpolation(.high)
+                            .frame(width: 22, height: 22)
+                            .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+                        Text("Blab")
+                            .font(.caption.weight(.semibold))
+                    }
                     Text(currentMember?.displayName ?? "未选择成员")
                         .font(.subheadline.weight(.semibold))
                     Text(currentMember?.username.isEmpty == false ? "@\(currentMember!.username)" : "")

@@ -83,18 +83,13 @@ struct DashboardSectionView: View {
                     )
                 }
 
-                EditorCard(
-                    title: "功能预留区",
-                    subtitle: "这里已保留给后续新增模块（你将来要放的功能可以直接挂在这里）。",
-                    systemImage: "sparkles.rectangle.stack.fill"
-                ) {
-                    Text("当前版本按你的要求不再展示“进行中 / 即将开始事项”。")
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                    Text("未来可扩展：待办面板、提醒中心、AI摘要、运营看板等。")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    }
+                DashboardAgentAssistantCard(
+                    currentMember: currentMember,
+                    items: items,
+                    locations: locations,
+                    events: events,
+                    members: members
+                )
 
                 if !itemAlerts.isEmpty {
                     EditorCard(
