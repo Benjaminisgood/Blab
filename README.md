@@ -183,7 +183,37 @@ curl -s -X POST http://127.0.0.1:48765/housekeeper/execute \
 - 可选输出 Agent 统计（`--show-agent-stats`）
 - 可选输出目标校验摘要（`--show-verification`）
 
-## 8. 当前已完成总结（本轮）
+## 8. 一键构建 DMG
+
+新增脚本：
+
+- `scripts/build_dmg.sh`
+
+执行方式：
+
+```bash
+./scripts/build_dmg.sh
+```
+
+默认行为：
+
+- 使用 `Release` 配置构建 `Blab`
+- 默认构建 `arm64 + x86_64`（universal）
+- 自动生成 DMG 到 `dist/`
+- 同时输出两份产物：
+  - 稳定命名：`dist/Blab-v<版本>-<架构>.dmg`
+  - 时间戳归档：`dist/Blab-v<版本>-<时间戳>-<架构>.dmg`
+- 为两份 DMG 都生成 `sha256` 文件
+
+可选环境变量：
+
+- `CONFIGURATION`（默认 `Release`）
+- `BUILD_ARCHS`（默认 `arm64 x86_64`）
+- `DIST_DIR`（默认 `./dist`）
+- `BUILD_LOG`（默认 `./build/blab_build.log`）
+- `DERIVED_DATA_PATH`（默认 `./build/DerivedData`）
+
+## 9. 当前已完成总结（本轮）
 
 - [x] 删除操作全链路支持（planner + executor + UI 摘要）
 - [x] 澄清交互改为自然语言补充
@@ -193,8 +223,9 @@ curl -s -X POST http://127.0.0.1:48765/housekeeper/execute \
 - [x] 增加 `agentStats` 可观测性
 - [x] 增加决策修复与参数自纠
 - [x] 引入 post-condition verifier（执行后目标达成校验）
+- [x] `repairPlan` 升级为 Loop 驱动（自动修复也支持 Tool->Observe->Replan）
 
-## 9. 下一阶段规划（Roadmap）
+## 10. 下一阶段规划（Roadmap）
 
 ### P1 稳定性
 
@@ -205,7 +236,7 @@ curl -s -X POST http://127.0.0.1:48765/housekeeper/execute \
 ### P2 能力
 
 - [x] 引入“目标达成校验器”（post-condition verifier）
-- [ ] 将 `repairPlan` 也升级为 Loop 驱动
+- [x] 将 `repairPlan` 也升级为 Loop 驱动
 - [ ] 增加更细粒度读工具（按 owner/时间范围查询）
 
 ### P3 工程化
@@ -214,7 +245,7 @@ curl -s -X POST http://127.0.0.1:48765/housekeeper/execute \
 - [ ] 提供 debug 开关：导出完整决策快照
 - [ ] 提供“高风险动作审批模式”（删除前二次确认策略）
 
-## 10. 关键事实与边界
+## 11. 关键事实与边界
 
 - 当前不是“远端原生 function calling”模式，而是“本地工具编排 + 本地执行器”模式。
 - 该模式的优势：可控、可审计、可离线演进。
@@ -222,4 +253,4 @@ curl -s -X POST http://127.0.0.1:48765/housekeeper/execute \
 
 ---
 
-如果你下一步要继续推进，我建议先做 `P1`（测试 + 轨迹治理），再做 `P2`（repairPlan Loop 化）。
+如果你下一步要继续推进，我建议先做 `P1`（测试 + 轨迹治理），再做“更细粒度读工具 + repair 的后置校验增强”。

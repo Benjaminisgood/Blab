@@ -401,6 +401,8 @@ struct DashboardHousekeeperCard: View {
             var finalResult = firstPass
             var repairPlan: AgentPlan?
             var repairError: String?
+            var repairTraceLines: [String] = []
+            var repairStats: HousekeeperAgentLoopStats?
             var verificationSummary: String?
             let preVerificationSnapshot = HousekeeperVerificationSnapshot(
                 items: items,
@@ -414,28 +416,40 @@ struct DashboardHousekeeperCard: View {
                let settings = aiSettings,
                settings.autoFillEnabled,
                settings.apiKey.trimmedNonEmpty != nil {
-                let context = AgentPlannerContext(
-                    now: .now,
-                    currentMemberName: currentMember?.displayName,
-                    itemNames: items.map(\.name),
-                    locationNames: locations.map(\.name),
-                    eventTitles: events.map(\.title),
-                    members: members.map { AgentPlannerMemberContext(name: $0.displayName, username: $0.username) }
-                )
-
                 let originalInput = latestSubmittedInstruction.trimmedNonEmpty
                     ?? instructionText.trimmedNonEmpty
                     ?? ""
 
                 do {
-                    let repaired = try await AgentPlannerService.repairPlan(
+                    let runtimeSnapshot = try await MainActor.run {
+                        try fetchVerificationSnapshot()
+                    }
+                    let context = AgentPlannerContext(
+                        now: .now,
+                        currentMemberName: currentMember?.displayName,
+                        itemNames: runtimeSnapshot.items.map(\.name),
+                        locationNames: runtimeSnapshot.locations.map(\.name),
+                        eventTitles: runtimeSnapshot.events.map(\.title),
+                        members: runtimeSnapshot.members.map {
+                            AgentPlannerMemberContext(name: $0.displayName, username: $0.username)
+                        }
+                    )
+
+                    let repairLoopResult = try await HousekeeperAgentLoopService.repairPlan(
                         originalInput: originalInput,
                         previousPlan: plan,
                         failedEntries: failedEntries,
                         settings: settings,
-                        context: context
+                        context: context,
+                        items: runtimeSnapshot.items,
+                        locations: runtimeSnapshot.locations,
+                        events: runtimeSnapshot.events,
+                        members: runtimeSnapshot.members
                     )
+                    let repaired = repairLoopResult.plan
                     repairPlan = repaired
+                    repairTraceLines = repairLoopResult.trace.map { "[repair] \($0)" }
+                    repairStats = repairLoopResult.stats
 
                     if repaired.clarification?.trimmedNonEmpty == nil,
                        !repaired.operations.isEmpty {
@@ -444,10 +458,10 @@ struct DashboardHousekeeperCard: View {
                                 plan: repaired,
                                 modelContext: modelContext,
                                 currentMember: currentMember,
-                                items: items,
-                                locations: locations,
-                                events: events,
-                                members: members
+                                items: runtimeSnapshot.items,
+                                locations: runtimeSnapshot.locations,
+                                events: runtimeSnapshot.events,
+                                members: runtimeSnapshot.members
                             )
                         }
                         finalResult = mergeExecutionResults(firstPass: firstPass, retryPass: retryResult)
@@ -498,6 +512,16 @@ struct DashboardHousekeeperCard: View {
             await MainActor.run {
                 executionResult = finalResult
                 isExecuting = false
+                if !repairTraceLines.isEmpty {
+                    agentTraceLines.append(contentsOf: repairTraceLines)
+                }
+                if let repairStats {
+                    if let existing = agentStats {
+                        agentStats = mergeAgentStats(primary: existing, secondary: repairStats)
+                    } else {
+                        agentStats = repairStats
+                    }
+                }
 
                 if let repaired = repairPlan,
                    let clarification = repaired.clarification?.trimmedNonEmpty {
@@ -543,6 +567,21 @@ struct DashboardHousekeeperCard: View {
         }
 
         return AgentExecutionResult(entries: firstSuccessEntries + retryEntries)
+    }
+
+    private func mergeAgentStats(
+        primary: HousekeeperAgentLoopStats,
+        secondary: HousekeeperAgentLoopStats
+    ) -> HousekeeperAgentLoopStats {
+        HousekeeperAgentLoopStats(
+            rounds: primary.rounds + secondary.rounds,
+            toolCalls: primary.toolCalls + secondary.toolCalls,
+            emptyToolResults: primary.emptyToolResults + secondary.emptyToolResults,
+            invalidDecisionCount: primary.invalidDecisionCount + secondary.invalidDecisionCount,
+            repairedDecisionCount: primary.repairedDecisionCount + secondary.repairedDecisionCount,
+            repeatedToolBlocked: primary.repeatedToolBlocked || secondary.repeatedToolBlocked,
+            usedFallbackPlan: primary.usedFallbackPlan || secondary.usedFallbackPlan
+        )
     }
 
     @MainActor

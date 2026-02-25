@@ -330,8 +330,8 @@ final class HousekeeperRuntimeService {
                 members: snapshot.members
             )
             let plan = loopResult.plan
-            let agentTrace = loopResult.trace
-            let agentStats = loopResult.stats
+            var agentTrace = loopResult.trace
+            var agentStats = loopResult.stats
 
             if let clarification = plan.clarification?.trimmedNonEmpty {
                 let response = HousekeeperExecuteResponse(
@@ -391,14 +391,21 @@ final class HousekeeperRuntimeService {
                             currentMember: currentMember,
                             snapshot: snapshot
                         )
-                        let repairedPlan = try await AgentPlannerService.repairPlan(
+                        let repairLoopResult = try await HousekeeperAgentLoopService.repairPlan(
                             originalInput: instruction,
                             previousPlan: plan,
                             failedEntries: failedEntries,
                             settings: settings,
-                            context: repairContext
+                            context: repairContext,
+                            items: snapshot.items,
+                            locations: snapshot.locations,
+                            events: snapshot.events,
+                            members: snapshot.members
                         )
+                        let repairedPlan = repairLoopResult.plan
                         finalPlan = repairedPlan
+                        agentTrace.append(contentsOf: repairLoopResult.trace.map { "[repair] \($0)" })
+                        agentStats = mergeAgentStats(primary: agentStats, secondary: repairLoopResult.stats)
 
                         if let clarification = repairedPlan.clarification?.trimmedNonEmpty {
                             let response = HousekeeperExecuteResponse(
@@ -729,6 +736,21 @@ final class HousekeeperRuntimeService {
         }
 
         return AgentExecutionResult(entries: firstSuccessEntries + retryEntries)
+    }
+
+    private func mergeAgentStats(
+        primary: HousekeeperAgentLoopStats,
+        secondary: HousekeeperAgentLoopStats
+    ) -> HousekeeperAgentLoopStats {
+        HousekeeperAgentLoopStats(
+            rounds: primary.rounds + secondary.rounds,
+            toolCalls: primary.toolCalls + secondary.toolCalls,
+            emptyToolResults: primary.emptyToolResults + secondary.emptyToolResults,
+            invalidDecisionCount: primary.invalidDecisionCount + secondary.invalidDecisionCount,
+            repairedDecisionCount: primary.repairedDecisionCount + secondary.repairedDecisionCount,
+            repeatedToolBlocked: primary.repeatedToolBlocked || secondary.repeatedToolBlocked,
+            usedFallbackPlan: primary.usedFallbackPlan || secondary.usedFallbackPlan
+        )
     }
 
     private func resolveCurrentMember(actorUsername: String?, members: [Member]) -> Member? {

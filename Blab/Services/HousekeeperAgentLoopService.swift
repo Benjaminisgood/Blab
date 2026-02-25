@@ -32,6 +32,59 @@ enum HousekeeperAgentLoopService {
         members: [Member],
         maxSteps: Int = 6
     ) async throws -> HousekeeperAgentLoopResult {
+        try await runLoop(
+            instruction: instruction,
+            settings: settings,
+            context: context,
+            items: items,
+            locations: locations,
+            events: events,
+            members: members,
+            maxSteps: maxSteps,
+            mode: .planning
+        )
+    }
+
+    static func repairPlan(
+        originalInput: String,
+        previousPlan: AgentPlan,
+        failedEntries: [AgentExecutionEntry],
+        settings: AISettings,
+        context: AgentPlannerContext,
+        items: [LabItem],
+        locations: [LabLocation],
+        events: [LabEvent],
+        members: [Member],
+        maxSteps: Int = 6
+    ) async throws -> HousekeeperAgentLoopResult {
+        guard !failedEntries.isEmpty else {
+            throw plannerError("当前无失败项，无需自动修复。")
+        }
+
+        return try await runLoop(
+            instruction: originalInput,
+            settings: settings,
+            context: context,
+            items: items,
+            locations: locations,
+            events: events,
+            members: members,
+            maxSteps: maxSteps,
+            mode: .repair(previousPlan: previousPlan, failedEntries: failedEntries)
+        )
+    }
+
+    private static func runLoop(
+        instruction: String,
+        settings: AISettings,
+        context: AgentPlannerContext,
+        items: [LabItem],
+        locations: [LabLocation],
+        events: [LabEvent],
+        members: [Member],
+        maxSteps: Int,
+        mode: FinalizationMode
+    ) async throws -> HousekeeperAgentLoopResult {
         let cleanedInstruction = instruction.trimmedNonEmpty
         guard let cleanedInstruction else {
             throw plannerError("请输入要执行的自然语言指令。")
@@ -82,12 +135,13 @@ enum HousekeeperAgentLoopService {
             switch decision.type {
             case .plan:
                 let enrichedInstruction = enrichInstruction(cleanedInstruction, observations: observations)
-                let plan = try await AgentPlannerService.plan(
-                    input: enrichedInstruction,
+                let plan = try await finalizePlan(
+                    instruction: enrichedInstruction,
                     settings: settings,
-                    context: context
+                    context: context,
+                    mode: mode
                 )
-                appendTrace(&trace, "第\(step)轮：决策=plan，进入计划生成。")
+                appendTrace(&trace, "第\(step)轮：决策=plan，进入\(phaseLabel(for: mode))。")
                 return HousekeeperAgentLoopResult(plan: plan, trace: trace, stats: stats)
 
             case .clarification:
@@ -156,14 +210,48 @@ enum HousekeeperAgentLoopService {
         }
 
         stats.usedFallbackPlan = true
-        appendTrace(&trace, "达到最大轮次（\(boundedMaxSteps)），转入兜底计划生成。")
+        appendTrace(&trace, "达到最大轮次（\(boundedMaxSteps)），转入兜底\(phaseLabel(for: mode))。")
         let fallbackInstruction = enrichInstruction(cleanedInstruction, observations: observations)
-        let plan = try await AgentPlannerService.plan(
-            input: fallbackInstruction,
+        let plan = try await finalizePlan(
+            instruction: fallbackInstruction,
             settings: settings,
-            context: context
+            context: context,
+            mode: mode
         )
         return HousekeeperAgentLoopResult(plan: plan, trace: trace, stats: stats)
+    }
+
+    private static func finalizePlan(
+        instruction: String,
+        settings: AISettings,
+        context: AgentPlannerContext,
+        mode: FinalizationMode
+    ) async throws -> AgentPlan {
+        switch mode {
+        case .planning:
+            return try await AgentPlannerService.plan(
+                input: instruction,
+                settings: settings,
+                context: context
+            )
+        case let .repair(previousPlan, failedEntries):
+            return try await AgentPlannerService.repairPlan(
+                originalInput: instruction,
+                previousPlan: previousPlan,
+                failedEntries: failedEntries,
+                settings: settings,
+                context: context
+            )
+        }
+    }
+
+    private static func phaseLabel(for mode: FinalizationMode) -> String {
+        switch mode {
+        case .planning:
+            return "计划生成"
+        case .repair:
+            return "修复计划生成"
+        }
     }
 
     private static func buildLoopPrompt(
@@ -821,6 +909,11 @@ private struct ToolExecutionOutcome {
     var isEmptyResult: Bool {
         resultCount == 0
     }
+}
+
+private enum FinalizationMode {
+    case planning
+    case repair(previousPlan: AgentPlan, failedEntries: [AgentExecutionEntry])
 }
 
 private extension String {
