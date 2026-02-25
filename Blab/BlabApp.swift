@@ -30,6 +30,10 @@ struct BlabApp: App {
         }
     }()
 
+    init() {
+        HousekeeperRuntimeService.shared.startIfNeeded(modelContainer: sharedModelContainer)
+    }
+
     var body: some Scene {
         WindowGroup {
             ContentView()

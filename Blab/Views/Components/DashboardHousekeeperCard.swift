@@ -1,7 +1,7 @@
 import SwiftUI
 import SwiftData
 
-struct DashboardAgentAssistantCard: View {
+struct DashboardHousekeeperCard: View {
     @Environment(\.modelContext) private var modelContext
     @Query(filter: #Predicate<AISettings> { $0.key == "default" }, sort: [SortDescriptor(\AISettings.updatedAt, order: .reverse)]) private var aiSettingsList: [AISettings]
     @AppStorage("dashboard.agent.autoExecuteEnabled") private var autoExecuteEnabled = false
@@ -28,7 +28,7 @@ struct DashboardAgentAssistantCard: View {
 
     var body: some View {
         EditorCard(
-            title: "智能录入助理",
+            title: "智能录入保姆",
             subtitle: "支持文本/语音输入，先生成执行计划，再确认自动新增/修改物品、空间、事项与成员。",
             systemImage: "sparkles.rectangle.stack.fill"
         ) {

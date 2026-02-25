@@ -83,7 +83,7 @@ struct DashboardSectionView: View {
                     )
                 }
 
-                DashboardAgentAssistantCard(
+                DashboardHousekeeperCard(
                     currentMember: currentMember,
                     items: items,
                     locations: locations,

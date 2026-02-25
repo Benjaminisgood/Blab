@@ -57,7 +57,7 @@ struct AIChatService {
         let requestPayload = ChatRequest(
             model: modelName,
             messages: [
-                ChatMessage(role: "system", content: "你是 Blab 的表单助手。请简洁回答。"),
+                ChatMessage(role: "system", content: "你是 Blab 的保姆。你会把自然语言任务转成可执行计划并谨慎执行。回答请简洁。"),
                 ChatMessage(role: "user", content: prompt)
             ],
             temperature: 0.2,
