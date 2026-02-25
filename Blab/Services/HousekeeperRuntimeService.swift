@@ -319,11 +319,18 @@ final class HousekeeperRuntimeService {
                 snapshot: snapshot
             )
 
-            let plan = try await AgentPlannerService.plan(
-                input: instruction,
+            let loopResult = try await HousekeeperAgentLoopService.plan(
+                instruction: instruction,
                 settings: settings,
-                context: initialPlannerContext
+                context: initialPlannerContext,
+                items: snapshot.items,
+                locations: snapshot.locations,
+                events: snapshot.events,
+                members: snapshot.members
             )
+            let plan = loopResult.plan
+            let agentTrace = loopResult.trace
+            let agentStats = loopResult.stats
 
             if let clarification = plan.clarification?.trimmedNonEmpty {
                 let response = HousekeeperExecuteResponse(
@@ -333,7 +340,9 @@ final class HousekeeperRuntimeService {
                     message: "需要补充说明后再执行。",
                     clarification: clarification,
                     plan: plan,
-                    execution: nil
+                    execution: nil,
+                    agentTrace: agentTrace,
+                    agentStats: agentStats
                 )
                 return finish(jsonResponse(statusCode: 200, payload: response))
             }
@@ -347,7 +356,9 @@ final class HousekeeperRuntimeService {
                     message: "计划生成完成，未执行。",
                     clarification: nil,
                     plan: plan,
-                    execution: nil
+                    execution: nil,
+                    agentTrace: agentTrace,
+                    agentStats: agentStats
                 )
                 return finish(jsonResponse(statusCode: 200, payload: response))
             }
@@ -394,7 +405,9 @@ final class HousekeeperRuntimeService {
                                 message: "首轮执行存在失败，自动修复需要补充说明。",
                                 clarification: clarification,
                                 plan: repairedPlan,
-                                execution: HousekeeperExecutionPayload(result: firstPass)
+                                execution: HousekeeperExecutionPayload(result: firstPass),
+                                agentTrace: agentTrace,
+                                agentStats: agentStats
                             )
                             return finish(jsonResponse(statusCode: 200, payload: response))
                         }
@@ -438,7 +451,9 @@ final class HousekeeperRuntimeService {
                     : "计划已执行，但存在失败项。\(finalExecution.summary)",
                 clarification: nil,
                 plan: finalPlan,
-                execution: executionPayload
+                execution: executionPayload,
+                agentTrace: agentTrace,
+                agentStats: agentStats
             )
             return finish(jsonResponse(statusCode: 200, payload: response))
         } catch {
@@ -882,6 +897,8 @@ private struct HousekeeperExecuteResponse: Codable {
     var clarification: String?
     var plan: AgentPlan?
     var execution: HousekeeperExecutionPayload?
+    var agentTrace: [String]?
+    var agentStats: HousekeeperAgentLoopStats?
 }
 
 private struct HousekeeperExecutionPayload: Codable {

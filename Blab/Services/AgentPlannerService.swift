@@ -17,6 +17,7 @@ struct AgentPlannerContext: Codable {
 enum AgentAction: String, Codable {
     case create
     case update
+    case delete
 }
 
 enum AgentEntity: String, Codable {
@@ -173,6 +174,8 @@ struct AgentOperation: Codable, Hashable, Identifiable {
             return "新增"
         case .update:
             return "修改"
+        case .delete:
+            return "删除"
         }
     }
 
@@ -190,7 +193,7 @@ struct AgentOperation: Codable, Hashable, Identifiable {
     }
 
     var targetPreviewText: String? {
-        guard action == .update else { return nil }
+        guard action != .create else { return nil }
 
         var fragments: [String] = []
         if let id = target?.id?.trimmedNonEmpty {
@@ -428,7 +431,7 @@ enum AgentPlannerService {
   "operations": [
     {
       "id": "字符串，可选",
-      "action": "create|update",
+      "action": "create|update|delete",
       "entity": "item|location|event|member",
       "target": { "id": "可选", "name": "可选", "username": "可选" },
       "item": {...},
@@ -440,11 +443,11 @@ enum AgentPlannerService {
   ],
   "clarification": "如需向用户追问则写在这里；无需追问可为空字符串"
 }
-3) 每个 operation 只填写与 entity 对应的字段，其他对象省略（尤其禁止 entity=event 但只填 target 不填 event）。
-4) update 必须给出可定位目标（target.id 或 target.name 或 target.username）。
+3) 每个 operation 只填写与 entity 对应的字段，其他对象省略。
+4) update/delete 必须给出可定位目标（target.id 或 target.name 或 target.username）。
 5) create 必须给出基础名称字段：item.name / location.name / event.title / member.name。
    - member.username 可选，若缺失请自动生成可用的小写英文用户名（尽量基于姓名拼音）。
-6) 不要输出删除动作，只能 create 或 update。
+6) delete 优先仅填写 target；对应实体对象可省略。
 7) 枚举值请使用以下规范：
    - item.status：\(itemStatuses)
    - item.feature：\(itemFeatures)
@@ -489,7 +492,8 @@ enum AgentPlannerService {
    - entity=location 仅用 location
    - entity=event 仅用 event
    - entity=member 仅用 member
-3) create 必须提供基础名称字段；update 必须能定位目标。
+   - 若 action=delete，可仅提供 target 并省略对应实体对象。
+3) create 必须提供基础名称字段；update/delete 必须能定位目标。
 4) 若信息仍不足，operations 置空，并在 clarification 明确指出缺什么。
 5) 请优先修复 failedEntries 对应问题，不要重复已经成功的写入动作。
 
@@ -653,53 +657,86 @@ enum AgentPlannerService {
 
             switch operation.entity {
             case .item:
-                guard hasItemPayload else {
+                if operation.action != .delete, !hasItemPayload {
                     return "\(prefix)缺少 item 字段。"
                 }
-                if operation.action == .create, operation.item?.name?.trimmedNonEmpty == nil {
-                    return "\(prefix)缺少 item.name。"
-                }
-                if operation.action == .update,
-                   !operation.target.hasLocator,
-                   operation.item?.name?.trimmedNonEmpty == nil {
-                    return "\(prefix)缺少可定位目标（target 或 item.name）。"
+                switch operation.action {
+                case .create:
+                    if operation.item?.name?.trimmedNonEmpty == nil {
+                        return "\(prefix)缺少 item.name。"
+                    }
+                case .update:
+                    if !operation.target.hasLocator,
+                       operation.item?.name?.trimmedNonEmpty == nil {
+                        return "\(prefix)缺少可定位目标（target 或 item.name）。"
+                    }
+                case .delete:
+                    if !operation.target.hasLocator,
+                       operation.item?.name?.trimmedNonEmpty == nil {
+                        return "\(prefix)缺少可定位目标（target 或 item.name）。"
+                    }
                 }
             case .location:
-                guard hasLocationPayload else {
+                if operation.action != .delete, !hasLocationPayload {
                     return "\(prefix)缺少 location 字段。"
                 }
-                if operation.action == .create, operation.location?.name?.trimmedNonEmpty == nil {
-                    return "\(prefix)缺少 location.name。"
-                }
-                if operation.action == .update,
-                   !operation.target.hasLocator,
-                   operation.location?.name?.trimmedNonEmpty == nil {
-                    return "\(prefix)缺少可定位目标（target 或 location.name）。"
+                switch operation.action {
+                case .create:
+                    if operation.location?.name?.trimmedNonEmpty == nil {
+                        return "\(prefix)缺少 location.name。"
+                    }
+                case .update:
+                    if !operation.target.hasLocator,
+                       operation.location?.name?.trimmedNonEmpty == nil {
+                        return "\(prefix)缺少可定位目标（target 或 location.name）。"
+                    }
+                case .delete:
+                    if !operation.target.hasLocator,
+                       operation.location?.name?.trimmedNonEmpty == nil {
+                        return "\(prefix)缺少可定位目标（target 或 location.name）。"
+                    }
                 }
             case .event:
-                guard hasEventPayload else {
+                if operation.action != .delete, !hasEventPayload {
                     return "\(prefix)缺少 event 字段。"
                 }
-                if operation.action == .create, operation.event?.title?.trimmedNonEmpty == nil {
-                    return "\(prefix)缺少 event.title。"
-                }
-                if operation.action == .update,
-                   !operation.target.hasLocator,
-                   operation.event?.title?.trimmedNonEmpty == nil {
-                    return "\(prefix)缺少可定位目标（target 或 event.title）。"
+                switch operation.action {
+                case .create:
+                    if operation.event?.title?.trimmedNonEmpty == nil {
+                        return "\(prefix)缺少 event.title。"
+                    }
+                case .update:
+                    if !operation.target.hasLocator,
+                       operation.event?.title?.trimmedNonEmpty == nil {
+                        return "\(prefix)缺少可定位目标（target 或 event.title）。"
+                    }
+                case .delete:
+                    if !operation.target.hasLocator,
+                       operation.event?.title?.trimmedNonEmpty == nil {
+                        return "\(prefix)缺少可定位目标（target 或 event.title）。"
+                    }
                 }
             case .member:
-                guard hasMemberPayload else {
+                if operation.action != .delete, !hasMemberPayload {
                     return "\(prefix)缺少 member 字段。"
                 }
-                if operation.action == .create, operation.member?.name?.trimmedNonEmpty == nil {
-                    return "\(prefix)缺少 member.name。"
-                }
-                if operation.action == .update,
-                   !operation.target.hasLocator,
-                   operation.member?.name?.trimmedNonEmpty == nil,
-                   operation.member?.username?.trimmedNonEmpty == nil {
-                    return "\(prefix)缺少可定位目标（target 或 member.name/member.username）。"
+                switch operation.action {
+                case .create:
+                    if operation.member?.name?.trimmedNonEmpty == nil {
+                        return "\(prefix)缺少 member.name。"
+                    }
+                case .update:
+                    if !operation.target.hasLocator,
+                       operation.member?.name?.trimmedNonEmpty == nil,
+                       operation.member?.username?.trimmedNonEmpty == nil {
+                        return "\(prefix)缺少可定位目标（target 或 member.name/member.username）。"
+                    }
+                case .delete:
+                    if !operation.target.hasLocator,
+                       operation.member?.name?.trimmedNonEmpty == nil,
+                       operation.member?.username?.trimmedNonEmpty == nil {
+                        return "\(prefix)缺少可定位目标（target 或 member.name/member.username）。"
+                    }
                 }
             }
 

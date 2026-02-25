@@ -40,6 +40,7 @@ enum AgentExecutorService {
         var runtimeLocations = locations
         var runtimeEvents = events
         var runtimeMembers = members
+        var attachmentRefsToDelete: [String] = []
 
         var entries: [AgentExecutionEntry] = []
 
@@ -53,6 +54,7 @@ enum AgentExecutorService {
                     locations: &runtimeLocations,
                     events: &runtimeEvents,
                     members: &runtimeMembers,
+                    deletedAttachmentRefs: &attachmentRefsToDelete,
                     requestID: requestID
                 )
                 entries.append(
@@ -76,6 +78,9 @@ enum AgentExecutorService {
         if entries.contains(where: { $0.success }) {
             do {
                 try modelContext.save()
+                for ref in Set(attachmentRefsToDelete) where !ref.isEmpty {
+                    AttachmentStore.deleteManagedFile(ref: ref)
+                }
             } catch {
                 entries.append(
                     AgentExecutionEntry(
@@ -98,6 +103,7 @@ enum AgentExecutorService {
         locations: inout [LabLocation],
         events: inout [LabEvent],
         members: inout [Member],
+        deletedAttachmentRefs: inout [String],
         requestID: String?
     ) throws -> String {
         switch operation.entity {
@@ -109,6 +115,7 @@ enum AgentExecutorService {
                 items: &items,
                 locations: locations,
                 members: members,
+                deletedAttachmentRefs: &deletedAttachmentRefs,
                 requestID: requestID
             )
         case .location:
@@ -118,6 +125,7 @@ enum AgentExecutorService {
                 currentMember: currentMember,
                 locations: &locations,
                 members: members,
+                deletedAttachmentRefs: &deletedAttachmentRefs,
                 requestID: requestID
             )
         case .event:
@@ -129,6 +137,7 @@ enum AgentExecutorService {
                 items: items,
                 locations: locations,
                 members: members,
+                deletedAttachmentRefs: &deletedAttachmentRefs,
                 requestID: requestID
             )
         case .member:
@@ -137,6 +146,7 @@ enum AgentExecutorService {
                 modelContext: modelContext,
                 currentMember: currentMember,
                 members: &members,
+                deletedAttachmentRefs: &deletedAttachmentRefs,
                 requestID: requestID
             )
         }
@@ -149,14 +159,14 @@ enum AgentExecutorService {
         items: inout [LabItem],
         locations: [LabLocation],
         members: [Member],
+        deletedAttachmentRefs: inout [String],
         requestID: String?
     ) throws -> String {
-        guard let fields = operation.item else {
-            throw executionError("物品操作缺少 item 字段。")
-        }
-
         switch operation.action {
         case .create:
+            guard let fields = operation.item else {
+                throw executionError("物品操作缺少 item 字段。")
+            }
             guard let name = fields.name?.trimmedNonEmpty else {
                 throw executionError("新增物品必须提供 item.name。")
             }
@@ -183,6 +193,9 @@ enum AgentExecutorService {
             return "已新增物品：\(target.name)"
 
         case .update:
+            guard let fields = operation.item else {
+                throw executionError("物品操作缺少 item 字段。")
+            }
             let target = try resolveItem(target: operation.target, fallbackName: fields.name, in: items)
             try patchItem(
                 target: target,
@@ -201,6 +214,31 @@ enum AgentExecutorService {
                 )
             )
             return "已修改物品：\(target.name)"
+        case .delete:
+            let fallbackName = operation.item?.name
+            let target = try resolveItem(target: operation.target, fallbackName: fallbackName, in: items)
+
+            if target.feature == .private,
+               let currentMember,
+               !target.responsibleMembers.contains(where: { $0.id == currentMember.id }) {
+                throw executionError("无权删除该私有物品：\(target.name)")
+            }
+
+            let refs = target.attachmentRefs
+            let targetID = target.id
+            let name = target.name
+            modelContext.delete(target)
+            items.removeAll { $0.id == targetID }
+            deletedAttachmentRefs.append(contentsOf: refs)
+
+            modelContext.insert(
+                LabLog(
+                    actionType: "AI删除物品",
+                    details: logDetails("AI deleted item \(name)", requestID: requestID),
+                    user: currentMember
+                )
+            )
+            return "已删除物品：\(name)"
         }
     }
 
@@ -300,14 +338,14 @@ enum AgentExecutorService {
         currentMember: Member?,
         locations: inout [LabLocation],
         members: [Member],
+        deletedAttachmentRefs: inout [String],
         requestID: String?
     ) throws -> String {
-        guard let fields = operation.location else {
-            throw executionError("空间操作缺少 location 字段。")
-        }
-
         switch operation.action {
         case .create:
+            guard let fields = operation.location else {
+                throw executionError("空间操作缺少 location 字段。")
+            }
             guard let name = fields.name?.trimmedNonEmpty else {
                 throw executionError("新增空间必须提供 location.name。")
             }
@@ -334,6 +372,9 @@ enum AgentExecutorService {
             return "已新增空间：\(target.name)"
 
         case .update:
+            guard let fields = operation.location else {
+                throw executionError("空间操作缺少 location 字段。")
+            }
             let target = try resolveLocation(target: operation.target, fallbackName: fields.name, in: locations)
             try patchLocation(
                 target: target,
@@ -352,6 +393,31 @@ enum AgentExecutorService {
                 )
             )
             return "已修改空间：\(target.name)"
+        case .delete:
+            let fallbackName = operation.location?.name
+            let target = try resolveLocation(target: operation.target, fallbackName: fallbackName, in: locations)
+
+            if !target.responsibleMembers.isEmpty,
+               let currentMember,
+               !target.responsibleMembers.contains(where: { $0.id == currentMember.id }) {
+                throw executionError("无权删除该空间：\(target.name)")
+            }
+
+            let refs = target.attachmentRefs
+            let targetID = target.id
+            let name = target.name
+            modelContext.delete(target)
+            locations.removeAll { $0.id == targetID }
+            deletedAttachmentRefs.append(contentsOf: refs)
+
+            modelContext.insert(
+                LabLog(
+                    actionType: "AI删除位置",
+                    details: logDetails("AI deleted location \(name)", requestID: requestID),
+                    user: currentMember
+                )
+            )
+            return "已删除空间：\(name)"
         }
     }
 
@@ -454,14 +520,14 @@ enum AgentExecutorService {
         items: [LabItem],
         locations: [LabLocation],
         members: [Member],
+        deletedAttachmentRefs: inout [String],
         requestID: String?
     ) throws -> String {
-        guard let fields = operation.event else {
-            throw executionError("事项操作缺少 event 字段。")
-        }
-
         switch operation.action {
         case .create:
+            guard let fields = operation.event else {
+                throw executionError("事项操作缺少 event 字段。")
+            }
             guard let title = fields.title?.trimmedNonEmpty else {
                 throw executionError("新增事项必须提供 event.title。")
             }
@@ -502,6 +568,9 @@ enum AgentExecutorService {
             return "已新增事项：\(target.title)"
 
         case .update:
+            guard let fields = operation.event else {
+                throw executionError("事项操作缺少 event 字段。")
+            }
             let target = try resolveEvent(target: operation.target, fallbackTitle: fields.title, in: events)
             try patchEvent(
                 target: target,
@@ -522,6 +591,28 @@ enum AgentExecutorService {
                 )
             )
             return "已修改事项：\(target.title)"
+        case .delete:
+            let fallbackTitle = operation.event?.title
+            let target = try resolveEvent(target: operation.target, fallbackTitle: fallbackTitle, in: events)
+            if target.owner?.id != nil, target.owner?.id != currentMember?.id {
+                throw executionError("仅事项负责人可删除：\(target.title)")
+            }
+
+            let refs = target.attachmentRefs
+            let targetID = target.id
+            let title = target.title
+            modelContext.delete(target)
+            events.removeAll { $0.id == targetID }
+            deletedAttachmentRefs.append(contentsOf: refs)
+
+            modelContext.insert(
+                LabLog(
+                    actionType: "AI删除事项",
+                    details: logDetails("AI deleted event \(title)", requestID: requestID),
+                    user: currentMember
+                )
+            )
+            return "已删除事项：\(title)"
         }
     }
 
@@ -712,14 +803,14 @@ enum AgentExecutorService {
         modelContext: ModelContext,
         currentMember: Member?,
         members: inout [Member],
+        deletedAttachmentRefs: inout [String],
         requestID: String?
     ) throws -> String {
-        guard let fields = operation.member else {
-            throw executionError("成员操作缺少 member 字段。")
-        }
-
         switch operation.action {
         case .create:
+            guard let fields = operation.member else {
+                throw executionError("成员操作缺少 member 字段。")
+            }
             guard let name = fields.name?.trimmedNonEmpty else {
                 throw executionError("新增成员必须提供 member.name。")
             }
@@ -745,6 +836,9 @@ enum AgentExecutorService {
             return "已新增成员：\(target.displayName)（@\(target.username)）"
 
         case .update:
+            guard let fields = operation.member else {
+                throw executionError("成员操作缺少 member 字段。")
+            }
             let target = try resolveMember(
                 target: operation.target,
                 fallbackName: fields.name,
@@ -762,6 +856,36 @@ enum AgentExecutorService {
                 )
             )
             return "已修改成员：\(target.displayName)"
+        case .delete:
+            let target = try resolveMember(
+                target: operation.target,
+                fallbackName: operation.member?.name,
+                fallbackUsername: operation.member?.username,
+                in: members
+            )
+            guard target.id != currentMember?.id else {
+                throw executionError("不能删除当前登录成员。")
+            }
+
+            let oldPhotoRef = target.photoRef
+            let targetID = target.id
+            let displayName = target.displayName
+            let username = target.username
+
+            modelContext.delete(target)
+            members.removeAll { $0.id == targetID }
+            if !oldPhotoRef.isEmpty {
+                deletedAttachmentRefs.append(oldPhotoRef)
+            }
+
+            modelContext.insert(
+                LabLog(
+                    actionType: "AI删除成员",
+                    details: logDetails("AI deleted member \(displayName)", requestID: requestID),
+                    user: currentMember
+                )
+            )
+            return "已删除成员：\(displayName)（@\(username)）"
         }
     }
 
@@ -871,7 +995,7 @@ enum AgentExecutorService {
             return try resolveItemName(nameToken, in: items)
         }
 
-        throw executionError("更新物品时缺少 target。")
+        throw executionError("物品操作缺少 target。")
     }
 
     private static func resolveLocation(
@@ -889,7 +1013,7 @@ enum AgentExecutorService {
             return try resolveLocationName(nameToken, in: locations)
         }
 
-        throw executionError("更新空间时缺少 target。")
+        throw executionError("空间操作缺少 target。")
     }
 
     private static func resolveEvent(
@@ -921,7 +1045,7 @@ enum AgentExecutorService {
             }
         }
 
-        throw executionError("未找到要更新的事项。")
+        throw executionError("未找到事项。")
     }
 
     private static func resolveMember(
@@ -950,7 +1074,7 @@ enum AgentExecutorService {
             return try resolveMemberToken(nameToken, in: members)
         }
 
-        throw executionError("更新成员时缺少 target。")
+        throw executionError("成员操作缺少 target。")
     }
 
     private static func resolveItems(tokens: [String], in items: [LabItem]) throws -> [LabItem] {

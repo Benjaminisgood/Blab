@@ -30,6 +30,27 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--health-timeout", type=float, default=2.5, help="Per health-check timeout (seconds).")
     parser.add_argument("--execute-timeout", type=float, default=120.0, help="Execute timeout (seconds).")
     parser.add_argument("--retry-delay", type=float, default=0.8, help="Delay between health retries (seconds).")
+    parser.add_argument(
+        "--show-agent-trace",
+        action="store_true",
+        help="Print agentTrace lines to stderr when response includes them.",
+    )
+    parser.add_argument(
+        "--show-agent-stats",
+        action="store_true",
+        help="Print agentStats to stderr when response includes them.",
+    )
+    parser.add_argument(
+        "--interactive-clarification",
+        action="store_true",
+        help="When clarification is required, prompt for natural-language supplement and retry automatically.",
+    )
+    parser.add_argument(
+        "--max-clarification-rounds",
+        type=int,
+        default=3,
+        help="Maximum clarification retries in interactive mode.",
+    )
     return parser.parse_args()
 
 
@@ -104,52 +125,108 @@ def main() -> None:
 
     ensure_health(base_url, args.health_retries, args.health_timeout, args.retry_delay)
 
-    payload: Dict[str, Any] = {
-        "instruction": args.instruction,
+    payload_template: Dict[str, Any] = {
         "autoExecute": not args.plan_only,
         "autoRepair": not args.no_auto_repair,
     }
     if args.actor_username.strip():
-        payload["actorUsername"] = args.actor_username.strip()
+        payload_template["actorUsername"] = args.actor_username.strip()
 
-    headers = build_headers(token, idempotency_key, request_id)
-    status_code, raw_body, response_headers = request_json(
-        "POST",
-        f"{base_url}/housekeeper/execute",
-        payload=payload,
-        headers=headers,
-        timeout=args.execute_timeout,
-    )
+    merged_instruction = args.instruction.strip()
+    clarification_round = 0
 
-    body = parse_json_or_none(raw_body)
-    if body is None:
-        print(raw_body)
-    else:
-        print(json.dumps(body, ensure_ascii=False, indent=2))
+    while True:
+        payload = dict(payload_template)
+        payload["instruction"] = merged_instruction
 
-    replayed = response_headers.get("X-Idempotency-Replayed", "unknown")
-    resolved_request_id = response_headers.get("X-Request-ID", request_id)
-    print(
-        f"request_id={resolved_request_id} idempotency_key={idempotency_key} replayed={replayed}",
-        file=sys.stderr,
-    )
+        current_idempotency_key = (
+            idempotency_key
+            if clarification_round == 0
+            else f"{idempotency_key}-c{clarification_round}"
+        )
+        current_request_id = (
+            request_id
+            if clarification_round == 0
+            else f"{request_id}-c{clarification_round}"
+        )
+        headers = build_headers(token, current_idempotency_key, current_request_id)
 
-    if status_code >= 400:
-        sys.exit(20)
+        status_code, raw_body, response_headers = request_json(
+            "POST",
+            f"{base_url}/housekeeper/execute",
+            payload=payload,
+            headers=headers,
+            timeout=args.execute_timeout,
+        )
 
-    if not body:
+        body = parse_json_or_none(raw_body)
+        if body is None:
+            print(raw_body)
+        else:
+            print(json.dumps(body, ensure_ascii=False, indent=2))
+
+        if args.show_agent_trace and body:
+            trace = body.get("agentTrace")
+            if isinstance(trace, list) and trace:
+                print("agent_trace:", file=sys.stderr)
+                for index, line in enumerate(trace, start=1):
+                    print(f"  {index}. {line}", file=sys.stderr)
+
+        if args.show_agent_stats and body:
+            stats = body.get("agentStats")
+            if isinstance(stats, dict):
+                stats_text = ", ".join(f"{key}={value}" for key, value in stats.items())
+                if stats_text:
+                    print(f"agent_stats: {stats_text}", file=sys.stderr)
+
+        replayed = response_headers.get("X-Idempotency-Replayed", "unknown")
+        resolved_request_id = response_headers.get("X-Request-ID", current_request_id)
+        print(
+            f"request_id={resolved_request_id} idempotency_key={current_idempotency_key} replayed={replayed}",
+            file=sys.stderr,
+        )
+
+        if status_code >= 400:
+            sys.exit(20)
+
+        if not body:
+            sys.exit(0)
+
+        status_text = str(body.get("status", ""))
+        if status_text == "clarification_required":
+            if not args.interactive_clarification:
+                sys.exit(21)
+
+            if clarification_round >= max(0, args.max_clarification_rounds):
+                print("clarification rounds exceeded.", file=sys.stderr)
+                sys.exit(21)
+
+            if not sys.stdin.isatty():
+                print("clarification required but stdin is not interactive.", file=sys.stderr)
+                sys.exit(21)
+
+            question = str(body.get("clarification") or "请继续补充信息：").strip()
+            print(f"clarification: {question}", file=sys.stderr)
+            try:
+                supplement = input("补充> ").strip()
+            except EOFError:
+                supplement = ""
+
+            if not supplement:
+                print("no supplement provided.", file=sys.stderr)
+                sys.exit(21)
+
+            clarification_round += 1
+            merged_instruction = f"{merged_instruction}；补充说明：{supplement}"
+            continue
+
+        if status_text == "executed":
+            execution = body.get("execution") or {}
+            failure_count = int(execution.get("failureCount") or 0)
+            if failure_count > 0:
+                sys.exit(22)
+
         sys.exit(0)
-
-    status_text = str(body.get("status", ""))
-    if status_text == "clarification_required":
-        sys.exit(21)
-    if status_text == "executed":
-        execution = body.get("execution") or {}
-        failure_count = int(execution.get("failureCount") or 0)
-        if failure_count > 0:
-            sys.exit(22)
-
-    sys.exit(0)
 
 
 if __name__ == "__main__":

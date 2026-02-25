@@ -20,9 +20,8 @@ struct DashboardHousekeeperCard: View {
     @State private var isExecuting = false
     @State private var latestSubmittedInstruction = ""
     @State private var clarificationReply = ""
-    @State private var clarificationDecision: ClarificationDecision = .supplement
-    @State private var clarificationTitleHint = ""
-    @State private var clarificationParticipantsHint = ""
+    @State private var agentTraceLines: [String] = []
+    @State private var agentStats: HousekeeperAgentLoopStats?
     @StateObject private var speechInputService = SpeechInputService()
 
     private var aiSettings: AISettings? {
@@ -30,20 +29,13 @@ struct DashboardHousekeeperCard: View {
     }
 
     private var canSubmitClarificationFeedback: Bool {
-        switch clarificationDecision {
-        case .confirm, .reject:
-            return true
-        case .supplement:
-            return clarificationReply.trimmedNonEmpty != nil
-                || clarificationTitleHint.trimmedNonEmpty != nil
-                || !parseParticipantNames(from: clarificationParticipantsHint).isEmpty
-        }
+        clarificationReply.trimmedNonEmpty != nil
     }
 
     var body: some View {
         EditorCard(
             title: "智能录入保姆",
-            subtitle: "支持文本/语音输入，先生成执行计划，再确认自动新增/修改物品、空间、事项与成员。",
+            subtitle: "支持文本/语音输入，先生成执行计划，再确认自动新增/修改/删除物品、空间、事项与成员。",
             systemImage: "sparkles.rectangle.stack.fill"
         ) {
             TextField(
@@ -129,6 +121,27 @@ struct DashboardHousekeeperCard: View {
                     .textSelection(.enabled)
             }
 
+            if !agentTraceLines.isEmpty {
+                if let agentStats {
+                    Text("Agent 回合 \(agentStats.rounds)，工具调用 \(agentStats.toolCalls)，空结果 \(agentStats.emptyToolResults)，修复 \(agentStats.repairedDecisionCount)")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+
+                DisclosureGroup("智能推理轨迹（\(agentTraceLines.count)步）") {
+                    VStack(alignment: .leading, spacing: 6) {
+                        ForEach(Array(agentTraceLines.enumerated()), id: \.offset) { _, line in
+                            Text(line)
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                                .textSelection(.enabled)
+                        }
+                    }
+                    .padding(.top, 4)
+                }
+                .font(.caption)
+            }
+
             if let pendingPlan {
                 Divider()
 
@@ -201,9 +214,6 @@ struct DashboardHousekeeperCard: View {
                 if let clarification = pendingPlan.clarification?.trimmedNonEmpty {
                     ClarificationEditor(
                         clarification: clarification,
-                        decision: $clarificationDecision,
-                        titleHint: $clarificationTitleHint,
-                        participantsHint: $clarificationParticipantsHint,
                         reply: $clarificationReply,
                         canSubmit: canSubmitClarificationFeedback,
                         isBusy: isPlanning || isExecuting,
@@ -253,6 +263,8 @@ struct DashboardHousekeeperCard: View {
         pendingPlan = nil
         planningError = nil
         executionResult = nil
+        agentTraceLines = []
+        agentStats = nil
     }
 
     private func toggleSpeechInput() {
@@ -294,6 +306,8 @@ struct DashboardHousekeeperCard: View {
         pendingPlan = nil
         isPlanning = true
         resetClarificationInputs()
+        agentTraceLines = []
+        agentStats = nil
         speechInputService.stopRecording()
 
         let context = AgentPlannerContext(
@@ -307,11 +321,22 @@ struct DashboardHousekeeperCard: View {
 
         Task {
             do {
-                let plan = try await AgentPlannerService.plan(input: promptInput, settings: aiSettings, context: context)
+                let loopResult = try await HousekeeperAgentLoopService.plan(
+                    instruction: promptInput,
+                    settings: aiSettings,
+                    context: context,
+                    items: items,
+                    locations: locations,
+                    events: events,
+                    members: members
+                )
+                let plan = loopResult.plan
                 await MainActor.run {
                     pendingPlan = plan
                     planningError = nil
                     isPlanning = false
+                    agentTraceLines = loopResult.trace
+                    agentStats = loopResult.stats
 
                     if autoExecuteEnabled,
                        plan.clarification?.trimmedNonEmpty == nil,
@@ -324,16 +349,17 @@ struct DashboardHousekeeperCard: View {
                     pendingPlan = nil
                     planningError = error.localizedDescription
                     isPlanning = false
+                    agentTraceLines = []
+                    agentStats = nil
                 }
             }
         }
     }
 
     private func regeneratePlanFromClarification(_ clarification: String) {
-        guard let feedback = buildClarificationFeedback() else { return }
+        guard let supplement = clarificationReply.trimmedNonEmpty else { return }
         let base = latestSubmittedInstruction.trimmedNonEmpty ?? instructionText.trimmedNonEmpty ?? ""
-        let feedbackSummary = feedback.summaryText
-        let merged = [base, feedbackSummary].filter { !$0.isEmpty }.joined(separator: "；")
+        let merged = [base, supplement].filter { !$0.isEmpty }.joined(separator: "；")
         instructionText = merged
 
         let clarificationPrompt = """
@@ -343,18 +369,11 @@ struct DashboardHousekeeperCard: View {
 上一轮待确认问题：
 \(clarification)
 
-用户结构化反馈（JSON）：
-\(encodeClarificationFeedback(feedback))
+用户补充说明（自然语言）：
+\(supplement)
 
-请严格遵循：
-1) 先理解 decision：
-   - confirm: 按原意继续规划；若涉及事项，必须给出 event.title。
-   - reject: 取消该意图，不要新增对应实体。
-   - supplement: 结合补充细节继续规划。
-2) 每个 operation 只能包含与 entity 对应的字段对象。
-3) create 必须有基础名称；update 必须有可定位目标。
-4) 若信息仍不足，返回 operations=[] 并在 clarification 说明缺少什么。
-请重新输出完整、可执行的 JSON 计划。
+请把“原始输入+补充说明”合并理解，重新输出完整、可执行的 JSON 计划。
+如果信息仍不足，operations 置空，并在 clarification 里明确追问缺少什么。
 """
 
         generatePlan(modelInput: clarificationPrompt, submittedInstruction: merged)
@@ -450,50 +469,6 @@ struct DashboardHousekeeperCard: View {
 
     private func resetClarificationInputs() {
         clarificationReply = ""
-        clarificationDecision = .supplement
-        clarificationTitleHint = ""
-        clarificationParticipantsHint = ""
-    }
-
-    private func buildClarificationFeedback() -> ClarificationFeedback? {
-        let detail = clarificationReply.trimmedNonEmpty
-        let title = clarificationTitleHint.trimmedNonEmpty
-        let participantNames = parseParticipantNames(from: clarificationParticipantsHint)
-        let normalizedParticipants = participantNames.isEmpty ? nil : participantNames
-
-        if clarificationDecision == .supplement,
-           detail == nil,
-           title == nil,
-           normalizedParticipants == nil {
-            return nil
-        }
-
-        return ClarificationFeedback(
-            decision: clarificationDecision.rawValue,
-            eventTitle: title,
-            participantNames: normalizedParticipants,
-            extraNote: detail
-        )
-    }
-
-    private func parseParticipantNames(from raw: String) -> [String] {
-        let separators = CharacterSet(charactersIn: ",，、;；\n")
-        return raw
-            .components(separatedBy: separators)
-            .map {
-                $0.trimmingCharacters(in: .whitespacesAndNewlines)
-            }
-            .filter { !$0.isEmpty }
-    }
-
-    private func encodeClarificationFeedback(_ feedback: ClarificationFeedback) -> String {
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.withoutEscapingSlashes]
-        guard let data = try? encoder.encode(feedback),
-              let text = String(data: data, encoding: .utf8) else {
-            return "{}"
-        }
-        return text
     }
 
     private func mergeExecutionResults(
@@ -524,9 +499,6 @@ struct DashboardHousekeeperCard: View {
 
 private struct ClarificationEditor: View {
     let clarification: String
-    @Binding var decision: ClarificationDecision
-    @Binding var titleHint: String
-    @Binding var participantsHint: String
     @Binding var reply: String
     let canSubmit: Bool
     let isBusy: Bool
@@ -535,41 +507,29 @@ private struct ClarificationEditor: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("待确认：\(clarification)")
+            Text("需要补充：\(clarification)")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .textSelection(.enabled)
 
-            Picker("处理方式", selection: $decision) {
-                Text(ClarificationDecision.confirm.label).tag(ClarificationDecision.confirm)
-                Text(ClarificationDecision.reject.label).tag(ClarificationDecision.reject)
-                Text(ClarificationDecision.supplement.label).tag(ClarificationDecision.supplement)
-            }
-            .pickerStyle(.segmented)
-            .font(.caption)
-
-            TextField("事项标题（可选）", text: $titleHint)
-
-            TextField("参与成员（可选，逗号分隔）", text: $participantsHint)
-
-            TextField(decision.replyPlaceholder, text: $reply, axis: .vertical)
+            TextField("请继续用自然语言补充（如时间、地点、目标对象）", text: $reply, axis: .vertical)
                 .lineLimit(2...4)
 
             HStack(spacing: 10) {
-                Button("结构化反馈并重新生成") {
+                Button("补充后重新生成") {
                     onSubmit()
                 }
                 .buttonStyle(.borderedProminent)
                 .disabled(isBusy || !canSubmit)
 
-                Button("忽略并手动继续编辑输入") {
+                Button("取消当前计划") {
                     onDismiss()
                 }
                 .buttonStyle(.bordered)
                 .disabled(isBusy)
             }
 
-            Text("存在待确认问题时，需先补充信息，系统不会执行。")
+            Text("你也可以直接编辑上方原始输入，再点击“生成执行计划”。")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
         }
@@ -583,74 +543,29 @@ private extension String {
     }
 }
 
-private enum ClarificationDecision: String, CaseIterable, Identifiable {
-    case confirm
-    case reject
-    case supplement
-
-    var id: String { rawValue }
-
-    var label: String {
-        switch self {
-        case .confirm:
-            return "确认意图"
-        case .reject:
-            return "否定意图"
-        case .supplement:
-            return "补充细节"
-        }
-    }
-
-    var replyPlaceholder: String {
-        switch self {
-        case .confirm:
-            return "可选：补充执行细节（如时间、地点）"
-        case .reject:
-            return "可选：说明取消原因或替代动作"
-        case .supplement:
-            return "请补充说明后重新生成计划"
-        }
-    }
-}
-
-private struct ClarificationFeedback: Codable {
-    var decision: String
-    var eventTitle: String?
-    var participantNames: [String]?
-    var extraNote: String?
-}
-
-private extension ClarificationFeedback {
-    var summaryText: String {
-        var parts = ["澄清decision=\(decision)"]
-        if let eventTitle {
-            parts.append("title=\(eventTitle)")
-        }
-        if let participantNames, !participantNames.isEmpty {
-            parts.append("participants=\(participantNames.joined(separator: ","))")
-        }
-        if let extraNote {
-            parts.append("note=\(extraNote)")
-        }
-        return parts.joined(separator: "；")
-    }
-}
-
 private extension AgentPlan {
     var batchSummaryText: String {
         guard !operations.isEmpty else { return "共 0 条操作" }
 
         let orderedPairs: [(AgentAction, AgentEntity)] = [
-            (.create, .item), (.update, .item),
-            (.create, .location), (.update, .location),
-            (.create, .event), (.update, .event),
-            (.create, .member), (.update, .member)
+            (.create, .item), (.update, .item), (.delete, .item),
+            (.create, .location), (.update, .location), (.delete, .location),
+            (.create, .event), (.update, .event), (.delete, .event),
+            (.create, .member), (.update, .member), (.delete, .member)
         ]
 
         let segments: [String] = orderedPairs.compactMap { pair in
             let count = operations.filter { $0.action == pair.0 && $0.entity == pair.1 }.count
             guard count > 0 else { return nil }
-            let action = pair.0 == .create ? "新增" : "修改"
+            let action: String
+            switch pair.0 {
+            case .create:
+                action = "新增"
+            case .update:
+                action = "修改"
+            case .delete:
+                action = "删除"
+            }
             let entity: String
             switch pair.1 {
             case .item:
