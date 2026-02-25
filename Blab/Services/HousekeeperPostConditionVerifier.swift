@@ -158,6 +158,19 @@ enum HousekeeperPostConditionVerifier {
         before: HousekeeperVerificationSnapshot,
         after: HousekeeperVerificationSnapshot
     ) -> HousekeeperVerificationEntry {
+        if isBulkDelete(operation: operation, fallbackToken: operation.item?.name) {
+            if before.items.isEmpty {
+                return successEntry(operation.id, "批量删除物品：执行前已为空。")
+            }
+            if after.items.count < before.items.count {
+                return successEntry(
+                    operation.id,
+                    "批量删除物品目标已达成（\(before.items.count) -> \(after.items.count)）。"
+                )
+            }
+            return failedEntry(operation.id, "批量删除校验失败：物品数量未减少。")
+        }
+
         do {
             guard let beforeTarget = try resolveItem(
                 target: operation.target,
@@ -253,6 +266,19 @@ enum HousekeeperPostConditionVerifier {
         before: HousekeeperVerificationSnapshot,
         after: HousekeeperVerificationSnapshot
     ) -> HousekeeperVerificationEntry {
+        if isBulkDelete(operation: operation, fallbackToken: operation.location?.name) {
+            if before.locations.isEmpty {
+                return successEntry(operation.id, "批量删除空间：执行前已为空。")
+            }
+            if after.locations.count < before.locations.count {
+                return successEntry(
+                    operation.id,
+                    "批量删除空间目标已达成（\(before.locations.count) -> \(after.locations.count)）。"
+                )
+            }
+            return failedEntry(operation.id, "批量删除校验失败：空间数量未减少。")
+        }
+
         do {
             guard let beforeTarget = try resolveLocation(
                 target: operation.target,
@@ -350,6 +376,19 @@ enum HousekeeperPostConditionVerifier {
         before: HousekeeperVerificationSnapshot,
         after: HousekeeperVerificationSnapshot
     ) -> HousekeeperVerificationEntry {
+        if isBulkDelete(operation: operation, fallbackToken: operation.event?.title) {
+            if before.events.isEmpty {
+                return successEntry(operation.id, "批量删除事项：执行前已为空。")
+            }
+            if after.events.count < before.events.count {
+                return successEntry(
+                    operation.id,
+                    "批量删除事项目标已达成（\(before.events.count) -> \(after.events.count)）。"
+                )
+            }
+            return failedEntry(operation.id, "批量删除校验失败：事项数量未减少。")
+        }
+
         do {
             guard let beforeTarget = try resolveEvent(
                 target: operation.target,
@@ -439,6 +478,22 @@ enum HousekeeperPostConditionVerifier {
         before: HousekeeperVerificationSnapshot,
         after: HousekeeperVerificationSnapshot
     ) -> HousekeeperVerificationEntry {
+        if isBulkDelete(
+            operation: operation,
+            fallbackToken: operation.member?.username ?? operation.member?.name
+        ) {
+            if before.members.isEmpty {
+                return successEntry(operation.id, "批量删除成员：执行前已为空。")
+            }
+            if after.members.count < before.members.count {
+                return successEntry(
+                    operation.id,
+                    "批量删除成员目标已达成（\(before.members.count) -> \(after.members.count)）。"
+                )
+            }
+            return failedEntry(operation.id, "批量删除校验失败：成员数量未减少。")
+        }
+
         do {
             guard let beforeTarget = try resolveMember(
                 target: operation.target,
@@ -841,6 +896,25 @@ enum HousekeeperPostConditionVerifier {
 
         return nil
     }
+
+    private static func isBulkDelete(operation: AgentOperation, fallbackToken: String?) -> Bool {
+        isBulkDeleteToken(trimmedNonEmpty(operation.target?.name))
+            || isBulkDeleteToken(trimmedNonEmpty(fallbackToken))
+            || isBulkDeleteToken(trimmedNonEmpty(operation.note))
+    }
+
+    private static func isBulkDeleteToken(_ token: String?) -> Bool {
+        guard let token else { return false }
+        let normalized = normalizedToken(token)
+        if normalized.isEmpty { return false }
+        return bulkDeleteTokens.contains { marker in
+            normalized == marker || normalized.contains(marker)
+        }
+    }
+
+    private static let bulkDeleteTokens: [String] = [
+        "__all__", "*", "all", "everything", "所有", "全部", "全体", "全都", "清空"
+    ]
 
     private static func resolveItems(tokens: [String], in items: [LabItem]) throws -> [LabItem] {
         var results: [LabItem] = []

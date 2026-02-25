@@ -444,10 +444,11 @@ enum AgentPlannerService {
   "clarification": "如需向用户追问则写在这里；无需追问可为空字符串"
 }
 3) 每个 operation 只填写与 entity 对应的字段，其他对象省略。
-4) update/delete 必须给出可定位目标（target.id 或 target.name 或 target.username）。
+4) update 必须给出可定位目标（target.id 或 target.name 或 target.username）。
+   - delete 可给出可定位目标；若用户明确说“删除全部/所有/清空”，可使用 target.name="__ALL__"（或 "所有" / "全部" / "all" / "*"）。
 5) create 必须给出基础名称字段：item.name / location.name / event.title / member.name。
    - member.username 可选，若缺失请自动生成可用的小写英文用户名（尽量基于姓名拼音）。
-6) delete 优先仅填写 target；对应实体对象可省略。
+6) delete 优先仅填写 target；对应实体对象可省略。批量删除建议只保留 target.name="__ALL__"。
 7) 枚举值请使用以下规范：
    - item.status：\(itemStatuses)
    - item.feature：\(itemFeatures)
@@ -493,7 +494,8 @@ enum AgentPlannerService {
    - entity=event 仅用 event
    - entity=member 仅用 member
    - 若 action=delete，可仅提供 target 并省略对应实体对象。
-3) create 必须提供基础名称字段；update/delete 必须能定位目标。
+3) create 必须提供基础名称字段；update 必须能定位目标。
+   - delete 若为批量删除，可用 target.name="__ALL__"（或同义词“所有/全部/all/*”）。
 4) 若信息仍不足，operations 置空，并在 clarification 明确指出缺什么。
 5) 请优先修复 failedEntries 对应问题，不要重复已经成功的写入动作。
 
@@ -600,6 +602,7 @@ enum AgentPlannerService {
                 updated.id = UUID().uuidString
             }
             updated.note = updated.note?.trimmedNonEmpty
+            updated = normalizeBulkDeleteTargetIfNeeded(updated)
             return updated
         }
 
@@ -607,6 +610,36 @@ enum AgentPlannerService {
             operations: normalizedOperations,
             clarification: plan.clarification?.trimmedNonEmpty
         )
+    }
+
+    private static func normalizeBulkDeleteTargetIfNeeded(_ operation: AgentOperation) -> AgentOperation {
+        guard operation.action == .delete else { return operation }
+
+        let payloadToken: String? = {
+            switch operation.entity {
+            case .item:
+                return operation.item?.name
+            case .location:
+                return operation.location?.name
+            case .event:
+                return operation.event?.title
+            case .member:
+                return operation.member?.username ?? operation.member?.name
+            }
+        }()
+
+        let shouldMarkAll = isBulkDeleteToken(operation.target?.name)
+            || isBulkDeleteToken(payloadToken)
+            || isBulkDeleteToken(operation.note)
+        guard shouldMarkAll else { return operation }
+
+        var updated = operation
+        updated.target = AgentTarget(
+            id: nil,
+            name: "__ALL__",
+            username: updated.target?.username
+        )
+        return updated
     }
 
     private static func applyPlanGuard(_ plan: AgentPlan) -> AgentPlan {
@@ -751,6 +784,22 @@ enum AgentPlannerService {
         }
         return "\(existing)\n\(guardClarification)"
     }
+
+    private static func isBulkDeleteToken(_ token: String?) -> Bool {
+        guard let token = token?.trimmedNonEmpty else { return false }
+        let normalized = token
+            .folding(options: [.diacriticInsensitive, .widthInsensitive, .caseInsensitive], locale: .current)
+            .lowercased()
+            .replacingOccurrences(of: #"\s+"#, with: "", options: .regularExpression)
+        if normalized.isEmpty { return false }
+        return bulkDeleteTokens.contains { marker in
+            normalized == marker || normalized.contains(marker)
+        }
+    }
+
+    private static let bulkDeleteTokens: [String] = [
+        "__all__", "*", "all", "everything", "所有", "全部", "全体", "全都", "清空"
+    ]
 
     private static func plannerError(_ message: String) -> NSError {
         NSError(

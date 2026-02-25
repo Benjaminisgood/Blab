@@ -34,7 +34,7 @@ struct DashboardHousekeeperCard: View {
 
     var body: some View {
         EditorCard(
-            title: "智能录入保姆",
+            title: "智能保姆",
             subtitle: "支持文本/语音输入，先生成执行计划，再确认自动新增/修改/删除物品、空间、事项与成员。",
             systemImage: "sparkles.rectangle.stack.fill"
         ) {
@@ -212,19 +212,35 @@ struct DashboardHousekeeperCard: View {
                 }
 
                 if let clarification = pendingPlan.clarification?.trimmedNonEmpty {
-                    ClarificationEditor(
-                        clarification: clarification,
-                        reply: $clarificationReply,
-                        canSubmit: canSubmitClarificationFeedback,
-                        isBusy: isPlanning || isExecuting,
-                        onSubmit: {
-                            regeneratePlanFromClarification(clarification)
-                        },
-                        onDismiss: {
-                            self.pendingPlan = nil
-                            resetClarificationInputs()
+                    if isReadOnlyResultText(clarification) {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("查询结果")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(.secondary)
+                            Text(clarification)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .textSelection(.enabled)
                         }
-                    )
+                        .padding(10)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(Color.secondary.opacity(0.08))
+                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    } else {
+                        ClarificationEditor(
+                            clarification: clarification,
+                            reply: $clarificationReply,
+                            canSubmit: canSubmitClarificationFeedback,
+                            isBusy: isPlanning || isExecuting,
+                            onSubmit: {
+                                regeneratePlanFromClarification(clarification)
+                            },
+                            onDismiss: {
+                                self.pendingPlan = nil
+                                resetClarificationInputs()
+                            }
+                        )
+                    }
                 }
             }
 
@@ -542,6 +558,11 @@ struct DashboardHousekeeperCard: View {
 
     private func resetClarificationInputs() {
         clarificationReply = ""
+    }
+
+    private func isReadOnlyResultText(_ text: String) -> Bool {
+        let normalized = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return normalized.hasPrefix("查询结果：")
     }
 
     private func mergeExecutionResults(

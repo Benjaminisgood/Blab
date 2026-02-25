@@ -21,6 +21,9 @@ enum HousekeeperAgentLoopService {
     private static let maxTraceLines = 40
     private static let maxTraceLineCharacters = 260
     private static let maxObservationCount = 12
+    private static let defaultSearchLimit = 5
+    private static let broadSearchLimit = 30
+    private static let maxSearchLimit = 50
 
     static func plan(
         instruction: String,
@@ -107,6 +110,19 @@ enum HousekeeperAgentLoopService {
             usedFallbackPlan: false
         )
 
+        if let readOnlyPlan = buildReadOnlyPlanIfNeeded(
+            instruction: cleanedInstruction,
+            currentMemberName: context.currentMemberName,
+            items: items,
+            locations: locations,
+            events: events,
+            members: members
+        ) {
+            stats.rounds = 1
+            appendTrace(&trace, "第1轮：检测到只读查询意图，直接返回检索结果。")
+            return HousekeeperAgentLoopResult(plan: readOnlyPlan, trace: trace, stats: stats)
+        }
+
         let boundedMaxSteps = max(1, maxSteps)
 
         for step in 1...boundedMaxSteps {
@@ -179,6 +195,18 @@ enum HousekeeperAgentLoopService {
                 repeatedCallCounter[signature] = callCount
 
                 if callCount > maxSameToolCall {
+                    if toolName.hasPrefix("search_"),
+                       shouldFastTrackCreatePlanning(for: cleanedInstruction) {
+                        appendTrace(&trace, "第\(step)轮：重复检索被拦截，检测到新增意图，直接进入\(phaseLabel(for: mode))。")
+                        let enrichedInstruction = enrichInstruction(cleanedInstruction, observations: observations)
+                        let plan = try await finalizePlan(
+                            instruction: enrichedInstruction,
+                            settings: settings,
+                            context: context,
+                            mode: mode
+                        )
+                        return HousekeeperAgentLoopResult(plan: plan, trace: trace, stats: stats)
+                    }
                     let clarification = "系统已多次尝试同一检索仍无进展，请补充更明确的信息（例如精确名称、用户名、时间）。"
                     stats.repeatedToolBlocked = true
                     appendTrace(&trace, "第\(step)轮：重复工具调用被拦截 -> \(signature)")
@@ -195,6 +223,7 @@ enum HousekeeperAgentLoopService {
                     target: decision.target,
                     entity: decision.entity,
                     limit: decision.limit,
+                    currentMemberName: context.currentMemberName,
                     items: items,
                     locations: locations,
                     events: events,
@@ -206,6 +235,20 @@ enum HousekeeperAgentLoopService {
                 }
                 observations.append(outcome.observation)
                 appendTrace(&trace, "第\(step)轮：\(outcome.brief)")
+
+                if toolName.hasPrefix("search_"),
+                   outcome.isEmptyResult,
+                   shouldFastTrackCreatePlanning(for: cleanedInstruction) {
+                    appendTrace(&trace, "第\(step)轮：检索为空且输入是新增意图，直接进入\(phaseLabel(for: mode))。")
+                    let enrichedInstruction = enrichInstruction(cleanedInstruction, observations: observations)
+                    let plan = try await finalizePlan(
+                        instruction: enrichedInstruction,
+                        settings: settings,
+                        context: context,
+                        mode: mode
+                    )
+                    return HousekeeperAgentLoopResult(plan: plan, trace: trace, stats: stats)
+                }
             }
         }
 
@@ -291,10 +334,10 @@ JSON Schema：
 {
   "type": "tool|plan|clarification",
   "tool": "search_items|search_locations|search_events|search_members|get_item|get_location|get_event|get_member",
-  "query": "字符串，可选（search_* 必填）",
+  "query": "字符串，可选（search_* 推荐填写关键词；全量查询可留空）",
   "target": "字符串，可选（get_* 必填）",
   "entity": "item|location|event|member，可选",
-  "limit": 1-10 的整数，可选，默认 5,
+  "limit": 1-50 的整数，可选，默认 5,
   "clarification": "当 type=clarification 时必填"
 }
 
@@ -303,6 +346,8 @@ JSON Schema：
 - 如果已有信息足够生成可执行计划，输出 type=plan。
 - 如果多次检索仍不足，输出 type=clarification。
 - 如果上一轮给出参数错误或检索为空，优先改用其它工具/参数继续尝试。
+- 对“所有/全部/有什么/有哪些/什么”这类范围查询，可先做范围检索，不要立即追问精确名称。
+- 对明确的新增意图（已给出核心字段）优先直接 plan，不要反复检索是否已存在。
 - 不要重复同一工具+参数组合。
 
 当前数据上下文：
@@ -322,17 +367,23 @@ JSON Schema：
         target: String?,
         entity: String?,
         limit: Int?,
+        currentMemberName: String?,
         items: [LabItem],
         locations: [LabLocation],
         events: [LabEvent],
         members: [Member]
     ) -> ToolExecutionOutcome {
-        let safeLimit = max(1, min(limit ?? 5, 10))
+        let safeLimit = clampSearchLimit(limit)
 
         switch name {
         case "search_items":
-            let q = query?.trimmedNonEmpty ?? ""
-            let results = searchItems(query: q, items: items, limit: safeLimit)
+            let q = query?.trimmed ?? ""
+            let results = searchItems(
+                query: q,
+                items: items,
+                limit: safeLimit,
+                currentMemberName: currentMemberName
+            )
             return ToolExecutionOutcome(
                 observation: "search_items(query=\(q), limit=\(safeLimit)) => \(encodeJSONString(results))",
                 brief: "tool=search_items resultCount=\(results.count)",
@@ -340,7 +391,7 @@ JSON Schema：
             )
 
         case "search_locations":
-            let q = query?.trimmedNonEmpty ?? ""
+            let q = query?.trimmed ?? ""
             let results = searchLocations(query: q, locations: locations, limit: safeLimit)
             return ToolExecutionOutcome(
                 observation: "search_locations(query=\(q), limit=\(safeLimit)) => \(encodeJSONString(results))",
@@ -349,7 +400,7 @@ JSON Schema：
             )
 
         case "search_events":
-            let q = query?.trimmedNonEmpty ?? ""
+            let q = query?.trimmed ?? ""
             let results = searchEvents(query: q, events: events, limit: safeLimit)
             return ToolExecutionOutcome(
                 observation: "search_events(query=\(q), limit=\(safeLimit)) => \(encodeJSONString(results))",
@@ -358,7 +409,7 @@ JSON Schema：
             )
 
         case "search_members":
-            let q = query?.trimmedNonEmpty ?? ""
+            let q = query?.trimmed ?? ""
             let results = searchMembers(query: q, members: members, limit: safeLimit)
             return ToolExecutionOutcome(
                 observation: "search_members(query=\(q), limit=\(safeLimit)) => \(encodeJSONString(results))",
@@ -412,23 +463,40 @@ JSON Schema：
         }
     }
 
-    private static func searchItems(query: String, items: [LabItem], limit: Int) -> [ItemDigest] {
-        let token = query.normalizedToken
-        let ranked = items.map { item -> (Int, LabItem) in
-            let name = item.name.normalizedToken
-            if token.isEmpty { return (0, item) }
-            if name == token { return (100, item) }
-            if name.contains(token) { return (70, item) }
-            return (-1, item)
+    private static func searchItems(
+        query: String,
+        items: [LabItem],
+        limit: Int,
+        currentMemberName: String?
+    ) -> [ItemDigest] {
+        let profile = parseItemSearchProfile(query)
+        let effectiveLimit = effectiveSearchLimit(baseLimit: limit, prefersBroadResult: profile.prefersBroadResult)
+        let filtered = items.filter { item in
+            if profile.ownOnly, !matchesCurrentMember(item: item, currentMemberName: currentMemberName) {
+                return false
+            }
+            if let feature = profile.featureFilter, item.feature != feature {
+                return false
+            }
+            return true
         }
-        .filter { token.isEmpty || $0.0 >= 0 }
+
+        let ranked = filtered.map { item -> (Int, LabItem) in
+            let relevance = relevanceScore(
+                candidate: item.name.normalizedToken,
+                fullToken: profile.combinedToken,
+                terms: profile.terms
+            )
+            return (relevance, item)
+        }
+        .filter { profile.prefersBroadResult || $0.0 >= 0 }
         .sorted { lhs, rhs in
             if lhs.0 == rhs.0 {
                 return lhs.1.name.localizedCaseInsensitiveCompare(rhs.1.name) == .orderedAscending
             }
             return lhs.0 > rhs.0
         }
-        .prefix(limit)
+        .prefix(effectiveLimit)
 
         return ranked.map { _, item in
             ItemDigest(
@@ -443,22 +511,27 @@ JSON Schema：
     }
 
     private static func searchLocations(query: String, locations: [LabLocation], limit: Int) -> [LocationDigest] {
-        let token = query.normalizedToken
+        let profile = parseGenericSearchProfile(
+            query: query,
+            entityStopwords: ["位置", "地点", "区域", "房间", "空间", "场所"]
+        )
+        let effectiveLimit = effectiveSearchLimit(baseLimit: limit, prefersBroadResult: profile.prefersBroadResult)
         let ranked = locations.map { location -> (Int, LabLocation) in
-            let name = location.name.normalizedToken
-            if token.isEmpty { return (0, location) }
-            if name == token { return (100, location) }
-            if name.contains(token) { return (70, location) }
-            return (-1, location)
+            let relevance = relevanceScore(
+                candidate: location.name.normalizedToken,
+                fullToken: profile.combinedToken,
+                terms: profile.terms
+            )
+            return (relevance, location)
         }
-        .filter { token.isEmpty || $0.0 >= 0 }
+        .filter { profile.prefersBroadResult || $0.0 >= 0 }
         .sorted { lhs, rhs in
             if lhs.0 == rhs.0 {
                 return lhs.1.name.localizedCaseInsensitiveCompare(rhs.1.name) == .orderedAscending
             }
             return lhs.0 > rhs.0
         }
-        .prefix(limit)
+        .prefix(effectiveLimit)
 
         return ranked.map { _, location in
             LocationDigest(
@@ -473,22 +546,27 @@ JSON Schema：
     }
 
     private static func searchEvents(query: String, events: [LabEvent], limit: Int) -> [EventDigest] {
-        let token = query.normalizedToken
+        let profile = parseGenericSearchProfile(
+            query: query,
+            entityStopwords: ["事项", "活动", "任务", "日程", "安排", "事件"]
+        )
+        let effectiveLimit = effectiveSearchLimit(baseLimit: limit, prefersBroadResult: profile.prefersBroadResult)
         let ranked = events.map { event -> (Int, LabEvent) in
-            let title = event.title.normalizedToken
-            if token.isEmpty { return (0, event) }
-            if title == token { return (100, event) }
-            if title.contains(token) { return (70, event) }
-            return (-1, event)
+            let relevance = relevanceScore(
+                candidate: event.title.normalizedToken,
+                fullToken: profile.combinedToken,
+                terms: profile.terms
+            )
+            return (relevance, event)
         }
-        .filter { token.isEmpty || $0.0 >= 0 }
+        .filter { profile.prefersBroadResult || $0.0 >= 0 }
         .sorted { lhs, rhs in
             if lhs.0 == rhs.0 {
                 return lhs.1.title.localizedCaseInsensitiveCompare(rhs.1.title) == .orderedAscending
             }
             return lhs.0 > rhs.0
         }
-        .prefix(limit)
+        .prefix(effectiveLimit)
 
         return ranked.map { _, event in
             EventDigest(
@@ -503,23 +581,28 @@ JSON Schema：
     }
 
     private static func searchMembers(query: String, members: [Member], limit: Int) -> [MemberDigest] {
-        let token = query.normalizedToken
+        let profile = parseGenericSearchProfile(
+            query: query,
+            entityStopwords: ["成员", "人员", "用户", "同事", "账号"]
+        )
+        let effectiveLimit = effectiveSearchLimit(baseLimit: limit, prefersBroadResult: profile.prefersBroadResult)
         let ranked = members.map { member -> (Int, Member) in
             let displayName = member.displayName.normalizedToken
             let username = member.username.normalizedToken
-            if token.isEmpty { return (0, member) }
-            if displayName == token || username == token { return (100, member) }
-            if displayName.contains(token) || username.contains(token) { return (70, member) }
-            return (-1, member)
+            let relevance = max(
+                relevanceScore(candidate: displayName, fullToken: profile.combinedToken, terms: profile.terms),
+                relevanceScore(candidate: username, fullToken: profile.combinedToken, terms: profile.terms)
+            )
+            return (relevance, member)
         }
-        .filter { token.isEmpty || $0.0 >= 0 }
+        .filter { profile.prefersBroadResult || $0.0 >= 0 }
         .sorted { lhs, rhs in
             if lhs.0 == rhs.0 {
                 return lhs.1.displayName.localizedCaseInsensitiveCompare(rhs.1.displayName) == .orderedAscending
             }
             return lhs.0 > rhs.0
         }
-        .prefix(limit)
+        .prefix(effectiveLimit)
 
         return ranked.map { _, member in
             MemberDigest(
@@ -673,9 +756,6 @@ JSON Schema：
     private static func validateToolDecision(toolName: String, decision: LoopDecision) -> String? {
         switch toolName {
         case "search_items", "search_locations", "search_events", "search_members":
-            guard decision.query?.trimmedNonEmpty != nil else {
-                return "\(toolName) 缺少 query。"
-            }
             return nil
         case "get_item", "get_location", "get_event", "get_member":
             guard decision.target?.trimmedNonEmpty != nil || decision.query?.trimmedNonEmpty != nil else {
@@ -706,10 +786,10 @@ JSON Schema：
 {
   "type": "tool|plan|clarification",
   "tool": "search_items|search_locations|search_events|search_members|get_item|get_location|get_event|get_member",
-  "query": "字符串，可选（search_* 必填）",
+  "query": "字符串，可选（search_* 推荐填写关键词；全量查询可留空）",
   "target": "字符串，可选（get_* 必填）",
   "entity": "item|location|event|member，可选",
-  "limit": 1-10 的整数，可选，默认 5,
+  "limit": 1-50 的整数，可选，默认 5,
   "clarification": "当 type=clarification 时必填"
 }
 
@@ -804,6 +884,301 @@ JSON Schema：
         }
         return text
     }
+
+    private static func clampSearchLimit(_ limit: Int?) -> Int {
+        max(1, min(limit ?? defaultSearchLimit, maxSearchLimit))
+    }
+
+    private static func effectiveSearchLimit(baseLimit: Int, prefersBroadResult: Bool) -> Int {
+        guard prefersBroadResult else { return baseLimit }
+        return min(max(baseLimit, broadSearchLimit), maxSearchLimit)
+    }
+
+    private static func parseItemSearchProfile(_ query: String) -> SearchQueryProfile {
+        let normalized = query.normalizedToken
+        let ownsOnlyByKeyword = containsAny(
+            normalized,
+            tokens: ["我的", "我负责", "我负责的", "由我负责", "归我", "属于我", "本人", "我名下", "我管理"]
+        )
+        let ownsOnlyByQuestion = normalized.contains("我")
+            && containsAny(normalized, tokens: questionLikeTokens + broadQueryTokens + ["我有", "我现在有"])
+        let hasPrivateSignal = containsAny(
+            normalized,
+            tokens: ["私有", "私人", "个人", "private", "personal"]
+        )
+        let hasPublicSignal = containsAny(
+            normalized,
+            tokens: ["公共", "公用", "公开", "共享", "public", "common"]
+        )
+        let featureFilter: ItemFeature? = {
+            if hasPrivateSignal == hasPublicSignal {
+                return nil
+            }
+            return hasPrivateSignal ? .private : .public
+        }()
+
+        let terms = normalizedQueryTerms(
+            query,
+            noiseTokens: commonNoiseTokens + itemEntityStopwords
+        )
+        let combined = terms.joined()
+        let requestsAll = terms.isEmpty || containsAny(normalized, tokens: broadQueryTokens + questionLikeTokens)
+
+        return SearchQueryProfile(
+            combinedToken: combined,
+            terms: terms,
+            requestsAll: requestsAll,
+            ownOnly: ownsOnlyByKeyword || ownsOnlyByQuestion,
+            featureFilter: featureFilter
+        )
+    }
+
+    private static func parseGenericSearchProfile(query: String, entityStopwords: [String]) -> SearchQueryProfile {
+        let normalized = query.normalizedToken
+        let terms = normalizedQueryTerms(
+            query,
+            noiseTokens: commonNoiseTokens + entityStopwords
+        )
+        let combined = terms.joined()
+        let requestsAll = terms.isEmpty || containsAny(normalized, tokens: broadQueryTokens + questionLikeTokens)
+
+        return SearchQueryProfile(
+            combinedToken: combined,
+            terms: terms,
+            requestsAll: requestsAll,
+            ownOnly: false,
+            featureFilter: nil
+        )
+    }
+
+    private static func buildReadOnlyPlanIfNeeded(
+        instruction: String,
+        currentMemberName: String?,
+        items: [LabItem],
+        locations: [LabLocation],
+        events: [LabEvent],
+        members: [Member]
+    ) -> AgentPlan? {
+        let normalized = instruction.normalizedToken
+        guard isReadOnlyQueryIntent(normalizedInstruction: normalized),
+              let entity = inferReadOnlyEntity(normalizedInstruction: normalized) else {
+            return nil
+        }
+
+        switch entity {
+        case .item:
+            let results = searchItems(
+                query: instruction,
+                items: items,
+                limit: maxSearchLimit,
+                currentMemberName: currentMemberName
+            )
+            return AgentPlan(operations: [], clarification: formatItemReadResult(results))
+        case .location:
+            let results = searchLocations(query: instruction, locations: locations, limit: maxSearchLimit)
+            return AgentPlan(operations: [], clarification: formatLocationReadResult(results))
+        case .event:
+            let results = searchEvents(query: instruction, events: events, limit: maxSearchLimit)
+            return AgentPlan(operations: [], clarification: formatEventReadResult(results))
+        case .member:
+            let results = searchMembers(query: instruction, members: members, limit: maxSearchLimit)
+            return AgentPlan(operations: [], clarification: formatMemberReadResult(results))
+        }
+    }
+
+    private static func isReadOnlyQueryIntent(normalizedInstruction: String) -> Bool {
+        let hasReadIntent = containsAny(
+            normalizedInstruction,
+            tokens: questionLikeTokens + ["查询", "查看", "列出", "清单", "列表", "检索"]
+        )
+        let hasWriteIntent = containsAny(
+            normalizedInstruction,
+            tokens: ["新增", "添加", "创建", "新建", "修改", "更新", "删除", "移除", "清空", "设为", "改成", "加上", "安排"]
+        )
+        return hasReadIntent && !hasWriteIntent
+    }
+
+    private static func inferReadOnlyEntity(normalizedInstruction: String) -> ReadOnlyEntity? {
+        if containsAny(normalizedInstruction, tokens: ["物品", "东西", "设备", "资产", "道具"]) {
+            return .item
+        }
+        if containsAny(normalizedInstruction, tokens: ["空间", "位置", "地点", "场所", "区域", "房间"]) {
+            return .location
+        }
+        if containsAny(normalizedInstruction, tokens: ["事项", "活动", "任务", "日程", "安排", "事件"]) {
+            return .event
+        }
+        if containsAny(normalizedInstruction, tokens: ["成员", "人员", "用户", "同事", "账号"]) {
+            return .member
+        }
+        return nil
+    }
+
+    private static func formatItemReadResult(_ results: [ItemDigest]) -> String {
+        guard !results.isEmpty else {
+            return "查询结果：当前没有匹配的物品。"
+        }
+        let displayLimit = 12
+        let lines = results.prefix(displayLimit).enumerated().map { index, item in
+            "\(index + 1). \(item.name)（\(item.feature) / \(item.status)）"
+        }
+        let tail = results.count > displayLimit ? "\n…其余 \(results.count - displayLimit) 条未展示" : ""
+        return "查询结果：共 \(results.count) 条物品。\n" + lines.joined(separator: "\n") + tail
+    }
+
+    private static func formatLocationReadResult(_ results: [LocationDigest]) -> String {
+        guard !results.isEmpty else {
+            return "查询结果：当前没有匹配的空间。"
+        }
+        let displayLimit = 12
+        let lines = results.prefix(displayLimit).enumerated().map { index, location in
+            let visibility = location.isPublic ? "公共" : "私有"
+            return "\(index + 1). \(location.name)（\(visibility) / \(location.status)）"
+        }
+        let tail = results.count > displayLimit ? "\n…其余 \(results.count - displayLimit) 条未展示" : ""
+        return "查询结果：共 \(results.count) 条空间。\n" + lines.joined(separator: "\n") + tail
+    }
+
+    private static func formatEventReadResult(_ results: [EventDigest]) -> String {
+        guard !results.isEmpty else {
+            return "查询结果：当前没有匹配的事项。"
+        }
+        let displayLimit = 12
+        let lines = results.prefix(displayLimit).enumerated().map { index, event in
+            let owner = event.ownerName ?? "未指定负责人"
+            return "\(index + 1). \(event.title)（\(event.visibility) / \(owner)）"
+        }
+        let tail = results.count > displayLimit ? "\n…其余 \(results.count - displayLimit) 条未展示" : ""
+        return "查询结果：共 \(results.count) 条事项。\n" + lines.joined(separator: "\n") + tail
+    }
+
+    private static func formatMemberReadResult(_ results: [MemberDigest]) -> String {
+        guard !results.isEmpty else {
+            return "查询结果：当前没有匹配的成员。"
+        }
+        let displayLimit = 12
+        let lines = results.prefix(displayLimit).enumerated().map { index, member in
+            "\(index + 1). \(member.name)（@\(member.username)）"
+        }
+        let tail = results.count > displayLimit ? "\n…其余 \(results.count - displayLimit) 条未展示" : ""
+        return "查询结果：共 \(results.count) 条成员。\n" + lines.joined(separator: "\n") + tail
+    }
+
+    private static func normalizedQueryTerms(_ query: String, noiseTokens: [String]) -> [String] {
+        var folded = query.folded()
+        folded = folded.replacingOccurrences(
+            of: #"[，。！？、；：,.!?;:/\\|]+"#,
+            with: " ",
+            options: .regularExpression
+        )
+
+        for token in noiseTokens.sorted(by: { $0.count > $1.count }) {
+            let normalized = token.folded()
+            guard !normalized.isEmpty else { continue }
+            folded = folded.replacingOccurrences(of: normalized, with: " ")
+        }
+
+        let parts = folded
+            .split(whereSeparator: { $0.isWhitespace })
+            .map { part in
+                String(part).replacingOccurrences(
+                    of: #"[^a-z0-9一-龥]+"#,
+                    with: "",
+                    options: .regularExpression
+                )
+            }
+            .filter { !$0.isEmpty }
+
+        var unique: [String] = []
+        var seen = Set<String>()
+        for part in parts {
+            if seen.insert(part).inserted {
+                unique.append(part)
+            }
+        }
+        return unique
+    }
+
+    private static func relevanceScore(candidate: String, fullToken: String, terms: [String]) -> Int {
+        if fullToken.isEmpty && terms.isEmpty {
+            return 0
+        }
+
+        if !fullToken.isEmpty {
+            if candidate == fullToken {
+                return 120
+            }
+            if candidate.contains(fullToken) {
+                return 90
+            }
+        }
+
+        let hitCount = terms.filter { candidate.contains($0) }.count
+        if hitCount == terms.count, hitCount > 0 {
+            return 70 + hitCount
+        }
+        if hitCount > 0 {
+            return 40 + hitCount
+        }
+        return -1
+    }
+
+    private static func matchesCurrentMember(item: LabItem, currentMemberName: String?) -> Bool {
+        guard let memberToken = currentMemberName?.normalizedToken,
+              !memberToken.isEmpty else {
+            return true
+        }
+        return item.responsibleMembers.contains { member in
+            let name = member.displayName.normalizedToken
+            let username = member.username.normalizedToken
+            return name == memberToken
+                || username == memberToken
+                || name.contains(memberToken)
+                || memberToken.contains(name)
+        }
+    }
+
+    private static func shouldFastTrackCreatePlanning(for instruction: String) -> Bool {
+        let normalized = instruction.normalizedToken
+        let hasCreateIntent = containsAny(
+            normalized,
+            tokens: ["新增", "添加", "创建", "新建", "安排", "有个", "建立", "录入", "加上", "创建一个", "新增一个"]
+        )
+        let hasUpdateOrDeleteIntent = containsAny(
+            normalized,
+            tokens: ["修改", "更新", "删除", "移除", "清空", "移到", "调整", "改成"]
+        )
+        return hasCreateIntent && !hasUpdateOrDeleteIntent
+    }
+
+    private static func containsAny(_ text: String, tokens: [String]) -> Bool {
+        tokens.contains { token in
+            let normalized = token.normalizedToken
+            guard !normalized.isEmpty else { return false }
+            return text.contains(normalized)
+        }
+    }
+
+    private static let broadQueryTokens: [String] = [
+        "__all__", "*", "all", "everything", "所有", "全部", "全体", "全都", "一切"
+    ]
+
+    private static let questionLikeTokens: [String] = [
+        "有什么", "有哪些", "什么", "哪些", "多少", "列表", "清单", "list"
+    ]
+
+    private static let commonNoiseTokens: [String] = [
+        "请", "帮我", "麻烦", "一下", "现在", "目前", "当前",
+        "查看", "查询", "搜索", "列出", "给我"
+    ]
+
+    private static let itemEntityStopwords: [String] = [
+        "物品", "东西", "设备", "资产", "道具",
+        "我",
+        "我的", "我负责", "我负责的", "由我负责", "归我", "属于我",
+        "私有", "私人", "个人", "公共", "公用", "公开", "共享",
+        "item", "items"
+    ]
 
     private static func plannerError(_ message: String) -> NSError {
         NSError(
@@ -909,6 +1284,25 @@ private struct ToolExecutionOutcome {
     var isEmptyResult: Bool {
         resultCount == 0
     }
+}
+
+private struct SearchQueryProfile {
+    var combinedToken: String
+    var terms: [String]
+    var requestsAll: Bool
+    var ownOnly: Bool
+    var featureFilter: ItemFeature?
+
+    var prefersBroadResult: Bool {
+        requestsAll || (combinedToken.isEmpty && terms.isEmpty)
+    }
+}
+
+private enum ReadOnlyEntity {
+    case item
+    case location
+    case event
+    case member
 }
 
 private enum FinalizationMode {

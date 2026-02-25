@@ -334,12 +334,13 @@ final class HousekeeperRuntimeService {
             var agentStats = loopResult.stats
 
             if let clarification = plan.clarification?.trimmedNonEmpty {
+                let isReadOnlyResult = clarification.hasPrefix("查询结果：")
                 let response = HousekeeperExecuteResponse(
                     ok: true,
                     requestID: requestID,
-                    status: "clarification_required",
-                    message: "需要补充说明后再执行。",
-                    clarification: clarification,
+                    status: isReadOnlyResult ? "planned" : "clarification_required",
+                    message: isReadOnlyResult ? "查询完成。" : "需要补充说明后再执行。",
+                    clarification: isReadOnlyResult ? nil : clarification,
                     plan: plan,
                     execution: nil,
                     agentTrace: agentTrace,

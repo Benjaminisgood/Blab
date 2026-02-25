@@ -216,6 +216,41 @@ enum AgentExecutorService {
             return "已修改物品：\(target.name)"
         case .delete:
             let fallbackName = operation.item?.name
+            if isBulkDelete(operation: operation, fallbackToken: fallbackName) {
+                let deletable = items.filter { candidate in
+                    if candidate.feature == .private,
+                       let currentMember,
+                       !candidate.responsibleMembers.contains(where: { $0.id == currentMember.id }) {
+                        return false
+                    }
+                    return true
+                }
+                guard !deletable.isEmpty else {
+                    throw executionError("当前范围内没有可删除的物品。")
+                }
+
+                let skippedCount = max(0, items.count - deletable.count)
+                for target in deletable {
+                    let refs = target.attachmentRefs
+                    let targetID = target.id
+                    let name = target.name
+                    modelContext.delete(target)
+                    items.removeAll { $0.id == targetID }
+                    deletedAttachmentRefs.append(contentsOf: refs)
+                    modelContext.insert(
+                        LabLog(
+                            actionType: "AI删除物品",
+                            details: logDetails("AI deleted item \(name)", requestID: requestID),
+                            user: currentMember
+                        )
+                    )
+                }
+                if skippedCount > 0 {
+                    return "已批量删除物品：\(deletable.count) 条，跳过无权限目标 \(skippedCount) 条。"
+                }
+                return "已批量删除物品：\(deletable.count) 条。"
+            }
+
             let target = try resolveItem(target: operation.target, fallbackName: fallbackName, in: items)
 
             if target.feature == .private,
@@ -395,6 +430,41 @@ enum AgentExecutorService {
             return "已修改空间：\(target.name)"
         case .delete:
             let fallbackName = operation.location?.name
+            if isBulkDelete(operation: operation, fallbackToken: fallbackName) {
+                let deletable = locations.filter { location in
+                    if !location.responsibleMembers.isEmpty,
+                       let currentMember,
+                       !location.responsibleMembers.contains(where: { $0.id == currentMember.id }) {
+                        return false
+                    }
+                    return true
+                }
+                guard !deletable.isEmpty else {
+                    throw executionError("当前范围内没有可删除的空间。")
+                }
+
+                let skippedCount = max(0, locations.count - deletable.count)
+                for target in deletable {
+                    let refs = target.attachmentRefs
+                    let targetID = target.id
+                    let name = target.name
+                    modelContext.delete(target)
+                    locations.removeAll { $0.id == targetID }
+                    deletedAttachmentRefs.append(contentsOf: refs)
+                    modelContext.insert(
+                        LabLog(
+                            actionType: "AI删除位置",
+                            details: logDetails("AI deleted location \(name)", requestID: requestID),
+                            user: currentMember
+                        )
+                    )
+                }
+                if skippedCount > 0 {
+                    return "已批量删除空间：\(deletable.count) 条，跳过无权限目标 \(skippedCount) 条。"
+                }
+                return "已批量删除空间：\(deletable.count) 条。"
+            }
+
             let target = try resolveLocation(target: operation.target, fallbackName: fallbackName, in: locations)
 
             if !target.responsibleMembers.isEmpty,
@@ -593,6 +663,39 @@ enum AgentExecutorService {
             return "已修改事项：\(target.title)"
         case .delete:
             let fallbackTitle = operation.event?.title
+            if isBulkDelete(operation: operation, fallbackToken: fallbackTitle) {
+                let deletable = events.filter { event in
+                    if event.owner?.id != nil, event.owner?.id != currentMember?.id {
+                        return false
+                    }
+                    return true
+                }
+                guard !deletable.isEmpty else {
+                    throw executionError("当前范围内没有可删除的事项。")
+                }
+
+                let skippedCount = max(0, events.count - deletable.count)
+                for target in deletable {
+                    let refs = target.attachmentRefs
+                    let targetID = target.id
+                    let title = target.title
+                    modelContext.delete(target)
+                    events.removeAll { $0.id == targetID }
+                    deletedAttachmentRefs.append(contentsOf: refs)
+                    modelContext.insert(
+                        LabLog(
+                            actionType: "AI删除事项",
+                            details: logDetails("AI deleted event \(title)", requestID: requestID),
+                            user: currentMember
+                        )
+                    )
+                }
+                if skippedCount > 0 {
+                    return "已批量删除事项：\(deletable.count) 条，跳过非本人负责目标 \(skippedCount) 条。"
+                }
+                return "已批量删除事项：\(deletable.count) 条。"
+            }
+
             let target = try resolveEvent(target: operation.target, fallbackTitle: fallbackTitle, in: events)
             if target.owner?.id != nil, target.owner?.id != currentMember?.id {
                 throw executionError("仅事项负责人可删除：\(target.title)")
@@ -857,6 +960,36 @@ enum AgentExecutorService {
             )
             return "已修改成员：\(target.displayName)"
         case .delete:
+            if isBulkDelete(operation: operation, fallbackToken: operation.member?.username ?? operation.member?.name) {
+                let deletable = members.filter { $0.id != currentMember?.id }
+                guard !deletable.isEmpty else {
+                    throw executionError("当前范围内没有可删除的成员。")
+                }
+
+                let skippedCount = members.contains(where: { $0.id == currentMember?.id }) ? 1 : 0
+                for target in deletable {
+                    let oldPhotoRef = target.photoRef
+                    let targetID = target.id
+                    let displayName = target.displayName
+                    modelContext.delete(target)
+                    members.removeAll { $0.id == targetID }
+                    if !oldPhotoRef.isEmpty {
+                        deletedAttachmentRefs.append(oldPhotoRef)
+                    }
+                    modelContext.insert(
+                        LabLog(
+                            actionType: "AI删除成员",
+                            details: logDetails("AI deleted member \(displayName)", requestID: requestID),
+                            user: currentMember
+                        )
+                    )
+                }
+                if skippedCount > 0 {
+                    return "已批量删除成员：\(deletable.count) 条，已自动保留当前登录成员。"
+                }
+                return "已批量删除成员：\(deletable.count) 条。"
+            }
+
             let target = try resolveMember(
                 target: operation.target,
                 fallbackName: operation.member?.name,
@@ -1076,6 +1209,25 @@ enum AgentExecutorService {
 
         throw executionError("成员操作缺少 target。")
     }
+
+    private static func isBulkDelete(operation: AgentOperation, fallbackToken: String?) -> Bool {
+        isBulkDeleteToken(operation.target?.name)
+            || isBulkDeleteToken(fallbackToken)
+            || isBulkDeleteToken(operation.note)
+    }
+
+    private static func isBulkDeleteToken(_ token: String?) -> Bool {
+        guard let token = token?.trimmedNonEmpty else { return false }
+        let normalized = token.normalizedToken
+        if normalized.isEmpty { return false }
+        return bulkDeleteTokens.contains { marker in
+            normalized == marker || normalized.contains(marker)
+        }
+    }
+
+    private static let bulkDeleteTokens: [String] = [
+        "__all__", "*", "all", "everything", "所有", "全部", "全体", "全都", "清空"
+    ]
 
     private static func resolveItems(tokens: [String], in items: [LabItem]) throws -> [LabItem] {
         var results: [LabItem] = []
