@@ -360,13 +360,52 @@ enum AgentPlannerService {
         let rawReply = try await AIChatService.complete(prompt: prompt, settings: settings, maxTokens: 1400)
         let plan = try decodePlan(from: rawReply)
         let normalized = normalizePlan(plan)
+        let guarded = applyPlanGuard(normalized)
 
-        if normalized.operations.isEmpty,
-           normalized.clarification?.trimmedNonEmpty == nil {
+        if guarded.operations.isEmpty,
+           guarded.clarification?.trimmedNonEmpty == nil {
             throw plannerError("AI 未生成可执行计划，请补充更具体的指令后重试。")
         }
 
-        return normalized
+        return guarded
+    }
+
+    static func repairPlan(
+        originalInput: String,
+        previousPlan: AgentPlan,
+        failedEntries: [AgentExecutionEntry],
+        settings: AISettings,
+        context: AgentPlannerContext
+    ) async throws -> AgentPlan {
+        let cleanedInput = originalInput.trimmedNonEmpty
+        guard let cleanedInput else {
+            throw plannerError("原始输入为空，无法自动修复计划。")
+        }
+        guard !failedEntries.isEmpty else {
+            throw plannerError("当前无失败项，无需自动修复。")
+        }
+
+        guard settings.autoFillEnabled else {
+            throw plannerError("AI 自动填写未启用，无法自动修复。")
+        }
+
+        let prompt = buildRepairPrompt(
+            originalInput: cleanedInput,
+            previousPlan: previousPlan,
+            failedEntries: failedEntries,
+            context: context
+        )
+        let rawReply = try await AIChatService.complete(prompt: prompt, settings: settings, maxTokens: 1400)
+        let repaired = try decodePlan(from: rawReply)
+        let normalized = normalizePlan(repaired)
+        let guarded = applyPlanGuard(normalized)
+
+        if guarded.operations.isEmpty,
+           guarded.clarification?.trimmedNonEmpty == nil {
+            throw plannerError("自动修复未生成可执行计划。")
+        }
+
+        return guarded
     }
 
     private static func buildPrompt(input: String, context: AgentPlannerContext) -> String {
@@ -401,7 +440,7 @@ enum AgentPlannerService {
   ],
   "clarification": "如需向用户追问则写在这里；无需追问可为空字符串"
 }
-3) 每个 operation 只填写与 entity 对应的字段，其他对象省略。
+3) 每个 operation 只填写与 entity 对应的字段，其他对象省略（尤其禁止 entity=event 但只填 target 不填 event）。
 4) update 必须给出可定位目标（target.id 或 target.name 或 target.username）。
 5) create 必须给出基础名称字段：item.name / location.name / event.title / member.name。
    - member.username 可选，若缺失请自动生成可用的小写英文用户名（尽量基于姓名拼音）。
@@ -424,10 +463,64 @@ enum AgentPlannerService {
 """
     }
 
+    private static func buildRepairPrompt(
+        originalInput: String,
+        previousPlan: AgentPlan,
+        failedEntries: [AgentExecutionEntry],
+        context: AgentPlannerContext
+    ) -> String {
+        let previousPlanJSON = encodeJSONString(previousPlan)
+        let failureSummary = failedEntries.map {
+            RepairFailureDigest(
+                operationID: $0.operationID,
+                message: $0.message
+            )
+        }
+        let failureJSON = encodeJSONString(failureSummary)
+        let contextJSON = contextJSONString(context)
+
+        return """
+你是 Blab 的计划修复 Agent。请根据失败原因，重写“失败的操作”，不要重复已成功的操作。
+
+输出要求（必须遵守）：
+1) 只输出一个 JSON 对象：{ "operations": [...], "clarification": "..." }。
+2) 每个 operation 必须满足实体字段一致性：
+   - entity=item 仅用 item
+   - entity=location 仅用 location
+   - entity=event 仅用 event
+   - entity=member 仅用 member
+3) create 必须提供基础名称字段；update 必须能定位目标。
+4) 若信息仍不足，operations 置空，并在 clarification 明确指出缺什么。
+5) 请优先修复 failedEntries 对应问题，不要重复已经成功的写入动作。
+
+原始用户输入：
+\(originalInput)
+
+上一轮计划：
+\(previousPlanJSON)
+
+失败项：
+\(failureJSON)
+
+当前数据上下文：
+\(contextJSON)
+"""
+    }
+
     private static func contextJSONString(_ context: AgentPlannerContext) -> String {
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
         guard let data = try? encoder.encode(context),
+              let text = String(data: data, encoding: .utf8) else {
+            return "{}"
+        }
+        return text
+    }
+
+    private static func encodeJSONString<T: Encodable>(_ value: T) -> String {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        guard let data = try? encoder.encode(value),
               let text = String(data: data, encoding: .utf8) else {
             return "{}"
         }
@@ -512,6 +605,116 @@ enum AgentPlannerService {
         )
     }
 
+    private static func applyPlanGuard(_ plan: AgentPlan) -> AgentPlan {
+        let issues = validateOperations(plan.operations)
+        guard !issues.isEmpty else { return plan }
+
+        let issueLines = issues
+            .enumerated()
+            .map { index, issue in "\(index + 1). \(issue)" }
+            .joined(separator: " ")
+        let guardClarification = "系统校验发现计划不完整，暂不执行。\(issueLines) 请补充信息后重新生成计划。"
+        let mergedClarification = mergeClarification(
+            existing: plan.clarification?.trimmedNonEmpty,
+            guardClarification: guardClarification
+        )
+
+        return AgentPlan(
+            operations: plan.operations,
+            clarification: mergedClarification
+        )
+    }
+
+    private static func validateOperations(_ operations: [AgentOperation]) -> [String] {
+        operations.enumerated().compactMap { index, operation in
+            let prefix = "第\(index + 1)条（\(operation.actionDisplayText)\(operation.entityDisplayText)）"
+
+            let hasItemPayload = operation.item?.hasMeaningfulValue ?? false
+            let hasLocationPayload = operation.location?.hasMeaningfulValue ?? false
+            let hasEventPayload = operation.event?.hasMeaningfulValue ?? false
+            let hasMemberPayload = operation.member?.hasMeaningfulValue ?? false
+
+            let unrelatedPayloadExists: Bool = {
+                switch operation.entity {
+                case .item:
+                    return hasLocationPayload || hasEventPayload || hasMemberPayload
+                case .location:
+                    return hasItemPayload || hasEventPayload || hasMemberPayload
+                case .event:
+                    return hasItemPayload || hasLocationPayload || hasMemberPayload
+                case .member:
+                    return hasItemPayload || hasLocationPayload || hasEventPayload
+                }
+            }()
+
+            if unrelatedPayloadExists {
+                return "\(prefix)包含非目标实体字段。"
+            }
+
+            switch operation.entity {
+            case .item:
+                guard hasItemPayload else {
+                    return "\(prefix)缺少 item 字段。"
+                }
+                if operation.action == .create, operation.item?.name?.trimmedNonEmpty == nil {
+                    return "\(prefix)缺少 item.name。"
+                }
+                if operation.action == .update,
+                   !operation.target.hasLocator,
+                   operation.item?.name?.trimmedNonEmpty == nil {
+                    return "\(prefix)缺少可定位目标（target 或 item.name）。"
+                }
+            case .location:
+                guard hasLocationPayload else {
+                    return "\(prefix)缺少 location 字段。"
+                }
+                if operation.action == .create, operation.location?.name?.trimmedNonEmpty == nil {
+                    return "\(prefix)缺少 location.name。"
+                }
+                if operation.action == .update,
+                   !operation.target.hasLocator,
+                   operation.location?.name?.trimmedNonEmpty == nil {
+                    return "\(prefix)缺少可定位目标（target 或 location.name）。"
+                }
+            case .event:
+                guard hasEventPayload else {
+                    return "\(prefix)缺少 event 字段。"
+                }
+                if operation.action == .create, operation.event?.title?.trimmedNonEmpty == nil {
+                    return "\(prefix)缺少 event.title。"
+                }
+                if operation.action == .update,
+                   !operation.target.hasLocator,
+                   operation.event?.title?.trimmedNonEmpty == nil {
+                    return "\(prefix)缺少可定位目标（target 或 event.title）。"
+                }
+            case .member:
+                guard hasMemberPayload else {
+                    return "\(prefix)缺少 member 字段。"
+                }
+                if operation.action == .create, operation.member?.name?.trimmedNonEmpty == nil {
+                    return "\(prefix)缺少 member.name。"
+                }
+                if operation.action == .update,
+                   !operation.target.hasLocator,
+                   operation.member?.name?.trimmedNonEmpty == nil,
+                   operation.member?.username?.trimmedNonEmpty == nil {
+                    return "\(prefix)缺少可定位目标（target 或 member.name/member.username）。"
+                }
+            }
+
+            return nil
+        }
+    }
+
+    private static func mergeClarification(existing: String?, guardClarification: String) -> String {
+        guard let existing else { return guardClarification }
+        if existing.contains(guardClarification) {
+            return existing
+        }
+        return "\(existing)\n\(guardClarification)"
+    }
+
     private static func plannerError(_ message: String) -> NSError {
         NSError(
             domain: "AgentPlannerService",
@@ -521,9 +724,47 @@ enum AgentPlannerService {
     }
 }
 
+private struct RepairFailureDigest: Codable {
+    var operationID: String
+    var message: String
+}
+
 private extension String {
     var trimmedNonEmpty: String? {
         let token = trimmingCharacters(in: .whitespacesAndNewlines)
         return token.isEmpty ? nil : token
+    }
+}
+
+private extension AgentTarget? {
+    var hasLocator: Bool {
+        guard let target = self else { return false }
+        return target.id?.trimmedNonEmpty != nil
+            || target.name?.trimmedNonEmpty != nil
+            || target.username?.trimmedNonEmpty != nil
+    }
+}
+
+private extension AgentItemFields {
+    var hasMeaningfulValue: Bool {
+        !fieldPreviewLines.isEmpty
+    }
+}
+
+private extension AgentLocationFields {
+    var hasMeaningfulValue: Bool {
+        !fieldPreviewLines.isEmpty
+    }
+}
+
+private extension AgentEventFields {
+    var hasMeaningfulValue: Bool {
+        !fieldPreviewLines.isEmpty
+    }
+}
+
+private extension AgentMemberFields {
+    var hasMeaningfulValue: Bool {
+        !fieldPreviewLines.isEmpty
     }
 }

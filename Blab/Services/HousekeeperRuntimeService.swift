@@ -307,38 +307,22 @@ final class HousekeeperRuntimeService {
                 return finish(errorResponse(statusCode: 409, message: "API Key 未配置。", requestID: requestID))
             }
 
-            let members = try modelContext.fetch(FetchDescriptor<Member>(sortBy: [SortDescriptor(\Member.name)]))
-            let items = try modelContext.fetch(FetchDescriptor<LabItem>(sortBy: [SortDescriptor(\LabItem.name)]))
-            let locations = try modelContext.fetch(FetchDescriptor<LabLocation>(sortBy: [SortDescriptor(\LabLocation.name)]))
-            let events = try modelContext.fetch(
-                FetchDescriptor<LabEvent>(
-                    sortBy: [
-                        SortDescriptor(\LabEvent.startTime, order: .forward),
-                        SortDescriptor(\LabEvent.createdAt, order: .reverse)
-                    ]
-                )
-            )
+            var snapshot = try fetchRuntimeData(from: modelContext)
 
             let currentMember = resolveCurrentMember(
                 actorUsername: payload.actorUsername,
-                members: members
+                members: snapshot.members
             )
 
-            let plannerContext = AgentPlannerContext(
-                now: .now,
-                currentMemberName: currentMember?.displayName,
-                itemNames: items.map(\.name),
-                locationNames: locations.map(\.name),
-                eventTitles: events.map(\.title),
-                members: members.map {
-                    AgentPlannerMemberContext(name: $0.displayName, username: $0.username)
-                }
+            let initialPlannerContext = plannerContext(
+                currentMember: currentMember,
+                snapshot: snapshot
             )
 
             let plan = try await AgentPlannerService.plan(
                 input: instruction,
                 settings: settings,
-                context: plannerContext
+                context: initialPlannerContext
             )
 
             if let clarification = plan.clarification?.trimmedNonEmpty {
@@ -368,27 +352,92 @@ final class HousekeeperRuntimeService {
                 return finish(jsonResponse(statusCode: 200, payload: response))
             }
 
-            let execution = AgentExecutorService.execute(
+            let firstPass = AgentExecutorService.execute(
                 plan: plan,
                 modelContext: modelContext,
                 currentMember: currentMember,
-                items: items,
-                locations: locations,
-                events: events,
-                members: members,
+                items: snapshot.items,
+                locations: snapshot.locations,
+                events: snapshot.events,
+                members: snapshot.members,
                 requestID: requestID
             )
 
-            let executionPayload = HousekeeperExecutionPayload(result: execution)
+            var finalExecution = firstPass
+            var finalPlan = plan
+            let shouldAutoRepair = payload.autoRepair ?? true
+
+            if shouldAutoRepair,
+               firstPass.failureCount > 0 {
+                let failedEntries = firstPass.entries.filter { !$0.success }
+                if !failedEntries.isEmpty {
+                    do {
+                        snapshot = try fetchRuntimeData(from: modelContext)
+                        let repairContext = plannerContext(
+                            currentMember: currentMember,
+                            snapshot: snapshot
+                        )
+                        let repairedPlan = try await AgentPlannerService.repairPlan(
+                            originalInput: instruction,
+                            previousPlan: plan,
+                            failedEntries: failedEntries,
+                            settings: settings,
+                            context: repairContext
+                        )
+                        finalPlan = repairedPlan
+
+                        if let clarification = repairedPlan.clarification?.trimmedNonEmpty {
+                            let response = HousekeeperExecuteResponse(
+                                ok: false,
+                                requestID: requestID,
+                                status: "clarification_required",
+                                message: "首轮执行存在失败，自动修复需要补充说明。",
+                                clarification: clarification,
+                                plan: repairedPlan,
+                                execution: HousekeeperExecutionPayload(result: firstPass)
+                            )
+                            return finish(jsonResponse(statusCode: 200, payload: response))
+                        }
+
+                        if !repairedPlan.operations.isEmpty {
+                            let retryPass = AgentExecutorService.execute(
+                                plan: repairedPlan,
+                                modelContext: modelContext,
+                                currentMember: currentMember,
+                                items: snapshot.items,
+                                locations: snapshot.locations,
+                                events: snapshot.events,
+                                members: snapshot.members,
+                                requestID: requestID
+                            )
+                            finalExecution = mergeExecutionResults(
+                                firstPass: firstPass,
+                                retryPass: retryPass
+                            )
+                        }
+                    } catch {
+                        let repairFailure = AgentExecutionEntry(
+                            operationID: "repair",
+                            success: false,
+                            message: "自动修复失败：\(error.localizedDescription)"
+                        )
+                        finalExecution = AgentExecutionResult(
+                            entries: firstPass.entries + [repairFailure]
+                        )
+                    }
+                }
+            }
+
+            let executionPayload = HousekeeperExecutionPayload(result: finalExecution)
             let response = HousekeeperExecuteResponse(
-                ok: execution.failureCount == 0,
+                ok: finalExecution.failureCount == 0,
                 requestID: requestID,
                 status: "executed",
-                message: execution.failureCount == 0
-                    ? execution.summary
-                    : "计划已执行，但存在失败项。\(execution.summary)",
+                message: finalExecution.failureCount == 0
+                    ? finalExecution.summary
+                    : "计划已执行，但存在失败项。\(finalExecution.summary)",
                 clarification: nil,
-                plan: plan,
+                plan: finalPlan,
                 execution: executionPayload
             )
             return finish(jsonResponse(statusCode: 200, payload: response))
@@ -576,6 +625,67 @@ final class HousekeeperRuntimeService {
         return try modelContext.fetch(descriptor).first
     }
 
+    private func fetchRuntimeData(from modelContext: ModelContext) throws -> RuntimeDataSnapshot {
+        let members = try modelContext.fetch(FetchDescriptor<Member>(sortBy: [SortDescriptor(\Member.name)]))
+        let items = try modelContext.fetch(FetchDescriptor<LabItem>(sortBy: [SortDescriptor(\LabItem.name)]))
+        let locations = try modelContext.fetch(FetchDescriptor<LabLocation>(sortBy: [SortDescriptor(\LabLocation.name)]))
+        let events = try modelContext.fetch(
+            FetchDescriptor<LabEvent>(
+                sortBy: [
+                    SortDescriptor(\LabEvent.startTime, order: .forward),
+                    SortDescriptor(\LabEvent.createdAt, order: .reverse)
+                ]
+            )
+        )
+        return RuntimeDataSnapshot(
+            members: members,
+            items: items,
+            locations: locations,
+            events: events
+        )
+    }
+
+    private func plannerContext(
+        currentMember: Member?,
+        snapshot: RuntimeDataSnapshot
+    ) -> AgentPlannerContext {
+        AgentPlannerContext(
+            now: .now,
+            currentMemberName: currentMember?.displayName,
+            itemNames: snapshot.items.map(\.name),
+            locationNames: snapshot.locations.map(\.name),
+            eventTitles: snapshot.events.map(\.title),
+            members: snapshot.members.map {
+                AgentPlannerMemberContext(name: $0.displayName, username: $0.username)
+            }
+        )
+    }
+
+    private func mergeExecutionResults(
+        firstPass: AgentExecutionResult,
+        retryPass: AgentExecutionResult
+    ) -> AgentExecutionResult {
+        let firstSuccessEntries = firstPass.entries
+            .filter(\.success)
+            .map { entry in
+                AgentExecutionEntry(
+                    operationID: entry.operationID,
+                    success: true,
+                    message: "[首轮] \(entry.message)"
+                )
+            }
+
+        let retryEntries = retryPass.entries.map { entry in
+            AgentExecutionEntry(
+                operationID: entry.operationID,
+                success: entry.success,
+                message: "[修复] \(entry.message)"
+            )
+        }
+
+        return AgentExecutionResult(entries: firstSuccessEntries + retryEntries)
+    }
+
     private func resolveCurrentMember(actorUsername: String?, members: [Member]) -> Member? {
         guard let actorToken = actorUsername?.trimmedNonEmpty else {
             return nil
@@ -760,6 +870,7 @@ private struct HTTPResponse {
 private struct HousekeeperExecuteRequest: Codable {
     var instruction: String
     var autoExecute: Bool?
+    var autoRepair: Bool?
     var actorUsername: String?
 }
 
@@ -801,6 +912,13 @@ private struct HousekeeperHealthPayload: Codable {
     var role: String
     var port: Int
     var startedAt: Date?
+}
+
+private struct RuntimeDataSnapshot {
+    var members: [Member]
+    var items: [LabItem]
+    var locations: [LabLocation]
+    var events: [LabEvent]
 }
 
 struct HousekeeperRuntimeSnapshot {

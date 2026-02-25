@@ -55,6 +55,7 @@ Blab 在应用启动后会尝试监听本地端口：
 {
   "instruction": "新增成员小王，用户名 wangx",
   "autoExecute": true,
+  "autoRepair": true,
   "actorUsername": "ben"
 }
 ```
@@ -63,6 +64,7 @@ Blab 在应用启动后会尝试监听本地端口：
 
 - `instruction`：自然语言任务（必填）
 - `autoExecute`：`false` 时仅返回计划，不执行写入（可选，默认 `true`）
+- `autoRepair`：执行失败时是否自动重规划并重试一次（可选，默认 `true`）
 - `actorUsername`：执行日志归属成员用户名（可选）
 
 请求头（建议）：
@@ -114,6 +116,7 @@ curl -s -X POST http://127.0.0.1:48765/housekeeper/execute \
 {
   "instruction": "把示波器状态改成借出并由 Ben 负责",
   "autoExecute": true,
+  "autoRepair": true,
   "actorUsername": "ben"
 }
 ```
@@ -153,6 +156,7 @@ curl -s -X POST http://127.0.0.1:48765/housekeeper/execute \
 - 自动健康检查重试
 - 自动注入幂等键（可自定义）
 - 支持 `--request-id` 透传 `X-Request-ID`
+- 默认启用自动修复（可用 `--no-auto-repair` 关闭）
 - 可选 Token 鉴权
 - 标准错误输出请求追踪摘要（`request_id / idempotency_key / replayed`）
 - 根据 `clarification/planned/executed` 返回不同退出码
