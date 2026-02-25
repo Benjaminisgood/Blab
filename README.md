@@ -7,6 +7,7 @@ Blab 是一个 macOS 原生本地应用（Swift + SwiftUI + SwiftData），本�
 - 决策循环：`Tool -> Observe -> Replan`
 - 自然语言补充：用户始终可用自然语言继续
 - 执行能力：支持 `create / update / delete`
+- 目标校验：执行后自动做 post-condition verifier
 - 可观测性：前端与 Runtime 都可查看 `agentTrace` + `agentStats`
 
 ## 1. 当前架构
@@ -86,6 +87,16 @@ Blab 是一个 macOS 原生本地应用（Swift + SwiftUI + SwiftData），本�
 2. 重规划失败操作
 3. 若可执行则重试一次
 
+### 3.4 目标达成校验（新增）
+
+执行完成后会做一轮本地 post-condition 校验：
+
+- 对 `create`：检查目标数量是否增加，并核对关键字段
+- 对 `update`：按目标定位并核对关键字段是否已生效
+- 对 `delete`：检查目标是否确实不存在
+
+若校验失败，响应仍为 `executed`，但 `ok=false`，并在 `verification` 中给出失败项。
+
 ## 4. 前端行为（Dashboard）
 
 - 生成计划已改走 Agent Loop
@@ -129,6 +140,8 @@ Blab 是一个 macOS 原生本地应用（Swift + SwiftUI + SwiftData），本�
   - 表示 Agent Loop 每一轮决策与工具观察
 - `agentStats`（可选）
   - `rounds / toolCalls / emptyToolResults / invalidDecisionCount / repairedDecisionCount / repeatedToolBlocked / usedFallbackPlan`
+- `verification`（可选）
+  - `successCount / failureCount / summary / entries[]`
 
 ### 5.6 请求头建议
 
@@ -165,9 +178,10 @@ curl -s -X POST http://127.0.0.1:48765/housekeeper/execute \
 - 自动健康检查重试
 - 幂等键注入
 - token 鉴权
-- 依据 `status` 返回退出码（`21` 表示需要补充信息）
+- 依据 `status` 返回退出码（`21` 表示需要补充信息，`23` 表示执行成功但目标校验失败）
 - 可选交互追问重试（`--interactive-clarification`，自然语言补充后自动续跑）
 - 可选输出 Agent 统计（`--show-agent-stats`）
+- 可选输出目标校验摘要（`--show-verification`）
 
 ## 8. 当前已完成总结（本轮）
 
@@ -178,6 +192,7 @@ curl -s -X POST http://127.0.0.1:48765/housekeeper/execute \
 - [x] 增加 `agentTrace` 可观测性
 - [x] 增加 `agentStats` 可观测性
 - [x] 增加决策修复与参数自纠
+- [x] 引入 post-condition verifier（执行后目标达成校验）
 
 ## 9. 下一阶段规划（Roadmap）
 
@@ -189,7 +204,7 @@ curl -s -X POST http://127.0.0.1:48765/housekeeper/execute \
 
 ### P2 能力
 
-- [ ] 引入“目标达成校验器”（post-condition verifier）
+- [x] 引入“目标达成校验器”（post-condition verifier）
 - [ ] 将 `repairPlan` 也升级为 Loop 驱动
 - [ ] 增加更细粒度读工具（按 owner/时间范围查询）
 
@@ -207,4 +222,4 @@ curl -s -X POST http://127.0.0.1:48765/housekeeper/execute \
 
 ---
 
-如果你下一步要继续推进，我建议先做 `P1`（测试 + 轨迹治理），再做 `P2`（校验器）。
+如果你下一步要继续推进，我建议先做 `P1`（测试 + 轨迹治理），再做 `P2`（repairPlan Loop 化）。

@@ -401,6 +401,13 @@ struct DashboardHousekeeperCard: View {
             var finalResult = firstPass
             var repairPlan: AgentPlan?
             var repairError: String?
+            var verificationSummary: String?
+            let preVerificationSnapshot = HousekeeperVerificationSnapshot(
+                items: items,
+                locations: locations,
+                events: events,
+                members: members
+            )
             let failedEntries = firstPass.entries.filter { !$0.success }
 
             if !failedEntries.isEmpty,
@@ -450,6 +457,44 @@ struct DashboardHousekeeperCard: View {
                 }
             }
 
+            let effectivePlan = repairPlan ?? plan
+            let verificationSnapshotResult = await MainActor.run {
+                Result {
+                    try fetchVerificationSnapshot()
+                }
+            }
+
+            switch verificationSnapshotResult {
+            case .success(let postVerificationSnapshot):
+                let verificationResult = HousekeeperPostConditionVerifier.verify(
+                    plan: effectivePlan,
+                    before: preVerificationSnapshot,
+                    after: postVerificationSnapshot
+                )
+                let failedVerifications = verificationResult.entries.filter { !$0.success }
+                if !failedVerifications.isEmpty {
+                    verificationSummary = verificationResult.summary
+                    let verificationEntries = failedVerifications.map { entry in
+                        AgentExecutionEntry(
+                            operationID: entry.operationID,
+                            success: false,
+                            message: "[校验] \(entry.message)"
+                        )
+                    }
+                    finalResult = AgentExecutionResult(entries: finalResult.entries + verificationEntries)
+                }
+            case .failure(let error):
+                finalResult = AgentExecutionResult(
+                    entries: finalResult.entries + [
+                        AgentExecutionEntry(
+                            operationID: "verify",
+                            success: false,
+                            message: "[校验] 无法读取最新数据：\(error.localizedDescription)"
+                        )
+                    ]
+                )
+            }
+
             await MainActor.run {
                 executionResult = finalResult
                 isExecuting = false
@@ -460,8 +505,12 @@ struct DashboardHousekeeperCard: View {
                     planningError = "自动修复需要补充信息：\(clarification)"
                 } else if let repairError {
                     planningError = "自动修复失败：\(repairError)"
-                } else if finalResult.successCount > 0 {
+                } else if let verificationSummary {
+                    planningError = "执行后目标校验未通过：\(verificationSummary)"
+                } else if finalResult.failureCount == 0, finalResult.successCount > 0 {
                     pendingPlan = nil
+                } else if finalResult.successCount > 0 {
+                    planningError = "执行存在失败项，请根据结果调整后重试。"
                 }
             }
         }
@@ -494,6 +543,28 @@ struct DashboardHousekeeperCard: View {
         }
 
         return AgentExecutionResult(entries: firstSuccessEntries + retryEntries)
+    }
+
+    @MainActor
+    private func fetchVerificationSnapshot() throws -> HousekeeperVerificationSnapshot {
+        let members = try modelContext.fetch(FetchDescriptor<Member>(sortBy: [SortDescriptor(\Member.name)]))
+        let items = try modelContext.fetch(FetchDescriptor<LabItem>(sortBy: [SortDescriptor(\LabItem.name)]))
+        let locations = try modelContext.fetch(FetchDescriptor<LabLocation>(sortBy: [SortDescriptor(\LabLocation.name)]))
+        let events = try modelContext.fetch(
+            FetchDescriptor<LabEvent>(
+                sortBy: [
+                    SortDescriptor(\LabEvent.startTime, order: .forward),
+                    SortDescriptor(\LabEvent.createdAt, order: .reverse)
+                ]
+            )
+        )
+
+        return HousekeeperVerificationSnapshot(
+            items: items,
+            locations: locations,
+            events: events,
+            members: members
+        )
     }
 }
 

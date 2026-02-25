@@ -308,6 +308,7 @@ final class HousekeeperRuntimeService {
             }
 
             var snapshot = try fetchRuntimeData(from: modelContext)
+            let preExecutionSnapshot = toVerificationSnapshot(snapshot)
 
             let currentMember = resolveCurrentMember(
                 actorUsername: payload.actorUsername,
@@ -342,7 +343,8 @@ final class HousekeeperRuntimeService {
                     plan: plan,
                     execution: nil,
                     agentTrace: agentTrace,
-                    agentStats: agentStats
+                    agentStats: agentStats,
+                    verification: nil
                 )
                 return finish(jsonResponse(statusCode: 200, payload: response))
             }
@@ -358,7 +360,8 @@ final class HousekeeperRuntimeService {
                     plan: plan,
                     execution: nil,
                     agentTrace: agentTrace,
-                    agentStats: agentStats
+                    agentStats: agentStats,
+                    verification: nil
                 )
                 return finish(jsonResponse(statusCode: 200, payload: response))
             }
@@ -407,7 +410,8 @@ final class HousekeeperRuntimeService {
                                 plan: repairedPlan,
                                 execution: HousekeeperExecutionPayload(result: firstPass),
                                 agentTrace: agentTrace,
-                                agentStats: agentStats
+                                agentStats: agentStats,
+                                verification: nil
                             )
                             return finish(jsonResponse(statusCode: 200, payload: response))
                         }
@@ -442,18 +446,35 @@ final class HousekeeperRuntimeService {
             }
 
             let executionPayload = HousekeeperExecutionPayload(result: finalExecution)
+            snapshot = try fetchRuntimeData(from: modelContext)
+            let verificationResult = HousekeeperPostConditionVerifier.verify(
+                plan: finalPlan,
+                before: preExecutionSnapshot,
+                after: toVerificationSnapshot(snapshot)
+            )
+            let verificationPayload = HousekeeperVerificationPayload(result: verificationResult)
+            let hasExecutionFailure = finalExecution.failureCount > 0
+            let hasVerificationFailure = verificationResult.failureCount > 0
+            let responseMessage: String
+            if hasExecutionFailure {
+                responseMessage = "计划已执行，但存在失败项。\(finalExecution.summary)"
+            } else if hasVerificationFailure {
+                responseMessage = "执行完成，但目标校验未通过。\(verificationResult.summary)"
+            } else {
+                responseMessage = "\(finalExecution.summary) \(verificationResult.summary)"
+            }
+
             let response = HousekeeperExecuteResponse(
-                ok: finalExecution.failureCount == 0,
+                ok: !hasExecutionFailure && !hasVerificationFailure,
                 requestID: requestID,
                 status: "executed",
-                message: finalExecution.failureCount == 0
-                    ? finalExecution.summary
-                    : "计划已执行，但存在失败项。\(finalExecution.summary)",
+                message: responseMessage,
                 clarification: nil,
                 plan: finalPlan,
                 execution: executionPayload,
                 agentTrace: agentTrace,
-                agentStats: agentStats
+                agentStats: agentStats,
+                verification: verificationPayload
             )
             return finish(jsonResponse(statusCode: 200, payload: response))
         } catch {
@@ -673,6 +694,15 @@ final class HousekeeperRuntimeService {
             members: snapshot.members.map {
                 AgentPlannerMemberContext(name: $0.displayName, username: $0.username)
             }
+        )
+    }
+
+    private func toVerificationSnapshot(_ snapshot: RuntimeDataSnapshot) -> HousekeeperVerificationSnapshot {
+        HousekeeperVerificationSnapshot(
+            items: snapshot.items,
+            locations: snapshot.locations,
+            events: snapshot.events,
+            members: snapshot.members
         )
     }
 
@@ -899,6 +929,7 @@ private struct HousekeeperExecuteResponse: Codable {
     var execution: HousekeeperExecutionPayload?
     var agentTrace: [String]?
     var agentStats: HousekeeperAgentLoopStats?
+    var verification: HousekeeperVerificationPayload?
 }
 
 private struct HousekeeperExecutionPayload: Codable {
@@ -914,6 +945,28 @@ private struct HousekeeperExecutionPayload: Codable {
     var entries: [Entry]
 
     init(result: AgentExecutionResult) {
+        successCount = result.successCount
+        failureCount = result.failureCount
+        summary = result.summary
+        entries = result.entries.map {
+            Entry(operationID: $0.operationID, success: $0.success, message: $0.message)
+        }
+    }
+}
+
+private struct HousekeeperVerificationPayload: Codable {
+    struct Entry: Codable {
+        var operationID: String
+        var success: Bool
+        var message: String
+    }
+
+    var successCount: Int
+    var failureCount: Int
+    var summary: String
+    var entries: [Entry]
+
+    init(result: HousekeeperVerificationResult) {
         successCount = result.successCount
         failureCount = result.failureCount
         summary = result.summary

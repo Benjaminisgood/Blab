@@ -41,6 +41,11 @@ def parse_args() -> argparse.Namespace:
         help="Print agentStats to stderr when response includes them.",
     )
     parser.add_argument(
+        "--show-verification",
+        action="store_true",
+        help="Print verification summary when response includes post-condition checks.",
+    )
+    parser.add_argument(
         "--interactive-clarification",
         action="store_true",
         help="When clarification is required, prompt for natural-language supplement and retry automatically.",
@@ -179,6 +184,18 @@ def main() -> None:
                 if stats_text:
                     print(f"agent_stats: {stats_text}", file=sys.stderr)
 
+        if args.show_verification and body:
+            verification = body.get("verification")
+            if isinstance(verification, dict):
+                summary = str(verification.get("summary") or "").strip()
+                failures = int(verification.get("failureCount") or 0)
+                successes = int(verification.get("successCount") or 0)
+                if summary or failures or successes:
+                    print(
+                        f"verification: success={successes} failure={failures} summary={summary}",
+                        file=sys.stderr,
+                    )
+
         replayed = response_headers.get("X-Idempotency-Replayed", "unknown")
         resolved_request_id = response_headers.get("X-Request-ID", current_request_id)
         print(
@@ -225,6 +242,10 @@ def main() -> None:
             failure_count = int(execution.get("failureCount") or 0)
             if failure_count > 0:
                 sys.exit(22)
+            verification = body.get("verification") or {}
+            verification_failure = int(verification.get("failureCount") or 0)
+            if verification_failure > 0:
+                sys.exit(23)
 
         sys.exit(0)
 
