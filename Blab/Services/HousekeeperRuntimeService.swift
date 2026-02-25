@@ -1,6 +1,7 @@
 import Foundation
 import Network
 import SwiftData
+import CryptoKit
 
 @MainActor
 final class HousekeeperRuntimeService {
@@ -9,12 +10,29 @@ final class HousekeeperRuntimeService {
 
     private static let maxRequestBytes = 1_048_576
     private static let headerBodyDelimiter = Data("\r\n\r\n".utf8)
+    private static let idempotencyTTL: TimeInterval = 24 * 60 * 60
+    private static let idempotencyMaxEntries: Int = 512
+    private static let runtimeFolder = "runtime"
+    private static let idempotencyStoreFilename = "idempotency_store_v1.json"
 
     private var listener: NWListener?
     private var modelContainer: ModelContainer?
     private var startedAt: Date?
+    private var isListenerReady = false
+    private var listenerStateText = "未启动"
+    private var lastListenerError: String?
+    private var requestCount: Int = 0
+    private var lastRequestAt: Date?
+    private var lastRequestPath: String?
+    private var lastRequestID: String?
+    private var lastResponseStatusCode: Int?
+    private var idempotencyStore: [String: IdempotencyCacheEntry] = [:]
 
-    private let jsonDecoder = JSONDecoder()
+    private let jsonDecoder: JSONDecoder = {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return decoder
+    }()
     private let jsonEncoder: JSONEncoder = {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.withoutEscapingSlashes]
@@ -52,8 +70,14 @@ final class HousekeeperRuntimeService {
 
             self.listener = listener
             self.startedAt = .now
+            self.isListenerReady = false
+            self.listenerStateText = "启动中"
+            self.lastListenerError = nil
+            loadIdempotencyStoreFromDisk()
             print("[HousekeeperRuntime] 已启动：127.0.0.1:\(Self.defaultPort)")
         } catch {
+            self.listenerStateText = "启动失败"
+            self.lastListenerError = error.localizedDescription
             print("[HousekeeperRuntime] 启动失败：\(error.localizedDescription)")
         }
     }
@@ -62,19 +86,56 @@ final class HousekeeperRuntimeService {
         listener?.cancel()
         listener = nil
         startedAt = nil
+        isListenerReady = false
+        listenerStateText = "已停止"
         print("[HousekeeperRuntime] 已停止")
+    }
+
+    func snapshot() -> HousekeeperRuntimeSnapshot {
+        HousekeeperRuntimeSnapshot(
+            port: Int(Self.defaultPort),
+            endpoint: "http://127.0.0.1:\(Self.defaultPort)",
+            isRunning: listener != nil,
+            isReady: isListenerReady,
+            stateText: listenerStateText,
+            startedAt: startedAt,
+            requestCount: requestCount,
+            lastRequestAt: lastRequestAt,
+            lastRequestPath: lastRequestPath,
+            lastRequestID: lastRequestID,
+            lastResponseStatusCode: lastResponseStatusCode,
+            idempotencyEntryCount: idempotencyStore.count,
+            tokenRequired: ProcessInfo.processInfo.environment["BLAB_HOUSEKEEPER_TOKEN"]?.trimmedNonEmpty != nil,
+            lastError: lastListenerError
+        )
     }
 
     private func handleListenerState(_ state: NWListener.State) {
         switch state {
         case .ready:
-            break
+            isListenerReady = true
+            listenerStateText = "监听中"
+            lastListenerError = nil
         case .failed(let error):
+            isListenerReady = false
+            listenerStateText = "监听失败"
+            lastListenerError = error.localizedDescription
             print("[HousekeeperRuntime] 监听失败：\(error.localizedDescription)")
             listener?.cancel()
             listener = nil
         case .cancelled:
+            isListenerReady = false
+            if listenerStateText != "已停止" {
+                listenerStateText = "已取消"
+            }
             listener = nil
+        case .setup:
+            isListenerReady = false
+            listenerStateText = "初始化"
+        case .waiting(let error):
+            isListenerReady = false
+            listenerStateText = "等待网络"
+            lastListenerError = error.localizedDescription
         default:
             break
         }
@@ -132,7 +193,14 @@ final class HousekeeperRuntimeService {
                 case .ready(let parsed):
                     Task { @MainActor [weak self] in
                         guard let self else { return }
+                        self.requestCount += 1
+                        self.lastRequestAt = .now
+                        self.lastRequestPath = parsed.request.path
                         let response = await self.route(request: parsed.request)
+                        self.lastRequestID = response.headers["X-Request-ID"]
+                            ?? parsed.request.headers["x-request-id"]
+                            ?? self.lastRequestID
+                        self.lastResponseStatusCode = response.statusCode
                         self.send(response, on: connection)
                     }
                 }
@@ -151,7 +219,11 @@ final class HousekeeperRuntimeService {
         case ("POST", "/housekeeper/execute"):
             return await executeResponse(for: request)
         default:
-            return errorResponse(statusCode: 404, message: "接口不存在。")
+            return errorResponse(
+                statusCode: 404,
+                message: "接口不存在。",
+                requestID: request.headers["x-request-id"]?.trimmedNonEmpty
+            )
         }
     }
 
@@ -164,7 +236,11 @@ final class HousekeeperRuntimeService {
             ?? request.headers["x-blab-token"]?.trimmedNonEmpty
 
         guard provided == expected else {
-            return errorResponse(statusCode: 401, message: "鉴权失败。")
+            return errorResponse(
+                statusCode: 401,
+                message: "鉴权失败。",
+                requestID: request.headers["x-request-id"]?.trimmedNonEmpty
+            )
         }
         return nil
     }
@@ -181,19 +257,40 @@ final class HousekeeperRuntimeService {
     }
 
     private func executeResponse(for request: HTTPRequest) async -> HTTPResponse {
+        let requestID = resolveRequestID(from: request)
+        let idempotencyKey = request.headers["idempotency-key"]?.trimmedNonEmpty
+        let requestHash = sha256Hex(request.body)
+
+        if let replay = replayedIdempotentResponse(
+            idempotencyKey: idempotencyKey,
+            requestHash: requestHash,
+            requestID: requestID
+        ) {
+            return replay
+        }
+
+        func finish(_ response: HTTPResponse) -> HTTPResponse {
+            finalizeExecuteResponse(
+                idempotencyKey: idempotencyKey,
+                requestHash: requestHash,
+                response: response,
+                requestID: requestID
+            )
+        }
+
         let payload: HousekeeperExecuteRequest
         do {
             payload = try jsonDecoder.decode(HousekeeperExecuteRequest.self, from: request.body)
         } catch {
-            return errorResponse(statusCode: 400, message: "请求体不是合法 JSON。")
+            return finish(errorResponse(statusCode: 400, message: "请求体不是合法 JSON。", requestID: requestID))
         }
 
         guard let instruction = payload.instruction.trimmedNonEmpty else {
-            return errorResponse(statusCode: 400, message: "instruction 不能为空。")
+            return finish(errorResponse(statusCode: 400, message: "instruction 不能为空。", requestID: requestID))
         }
 
         guard let modelContainer else {
-            return errorResponse(statusCode: 503, message: "保姆 Runtime 尚未就绪。")
+            return finish(errorResponse(statusCode: 503, message: "保姆 Runtime 尚未就绪。", requestID: requestID))
         }
 
         do {
@@ -201,13 +298,13 @@ final class HousekeeperRuntimeService {
             let settings = try fetchDefaultSettings(from: modelContext)
 
             guard let settings else {
-                return errorResponse(statusCode: 409, message: "未找到默认 AI 配置。")
+                return finish(errorResponse(statusCode: 409, message: "未找到默认 AI 配置。", requestID: requestID))
             }
             guard settings.autoFillEnabled else {
-                return errorResponse(statusCode: 409, message: "AI 自动填写未启用。")
+                return finish(errorResponse(statusCode: 409, message: "AI 自动填写未启用。", requestID: requestID))
             }
             guard settings.apiKey.trimmedNonEmpty != nil else {
-                return errorResponse(statusCode: 409, message: "API Key 未配置。")
+                return finish(errorResponse(statusCode: 409, message: "API Key 未配置。", requestID: requestID))
             }
 
             let members = try modelContext.fetch(FetchDescriptor<Member>(sortBy: [SortDescriptor(\Member.name)]))
@@ -247,26 +344,28 @@ final class HousekeeperRuntimeService {
             if let clarification = plan.clarification?.trimmedNonEmpty {
                 let response = HousekeeperExecuteResponse(
                     ok: true,
+                    requestID: requestID,
                     status: "clarification_required",
                     message: "需要补充说明后再执行。",
                     clarification: clarification,
                     plan: plan,
                     execution: nil
                 )
-                return jsonResponse(statusCode: 200, payload: response)
+                return finish(jsonResponse(statusCode: 200, payload: response))
             }
 
             let shouldExecute = payload.autoExecute ?? true
             guard shouldExecute else {
                 let response = HousekeeperExecuteResponse(
                     ok: true,
+                    requestID: requestID,
                     status: "planned",
                     message: "计划生成完成，未执行。",
                     clarification: nil,
                     plan: plan,
                     execution: nil
                 )
-                return jsonResponse(statusCode: 200, payload: response)
+                return finish(jsonResponse(statusCode: 200, payload: response))
             }
 
             let execution = AgentExecutorService.execute(
@@ -276,12 +375,14 @@ final class HousekeeperRuntimeService {
                 items: items,
                 locations: locations,
                 events: events,
-                members: members
+                members: members,
+                requestID: requestID
             )
 
             let executionPayload = HousekeeperExecutionPayload(result: execution)
             let response = HousekeeperExecuteResponse(
                 ok: execution.failureCount == 0,
+                requestID: requestID,
                 status: "executed",
                 message: execution.failureCount == 0
                     ? execution.summary
@@ -290,10 +391,181 @@ final class HousekeeperRuntimeService {
                 plan: plan,
                 execution: executionPayload
             )
-            return jsonResponse(statusCode: 200, payload: response)
+            return finish(jsonResponse(statusCode: 200, payload: response))
         } catch {
-            return errorResponse(statusCode: 500, message: "执行失败：\(error.localizedDescription)")
+            return finish(errorResponse(statusCode: 500, message: "执行失败：\(error.localizedDescription)", requestID: requestID))
         }
+    }
+
+    private func replayedIdempotentResponse(
+        idempotencyKey: String?,
+        requestHash: String,
+        requestID: String
+    ) -> HTTPResponse? {
+        guard let idempotencyKey else { return nil }
+        pruneIdempotencyStore(now: .now)
+
+        guard let cached = idempotencyStore[idempotencyKey] else {
+            return nil
+        }
+
+        guard cached.requestHash == requestHash else {
+            var conflict = errorResponse(
+                statusCode: 409,
+                message: "同一个 Idempotency-Key 绑定了不同请求。",
+                requestID: requestID
+            )
+            conflict.headers["Idempotency-Key"] = idempotencyKey
+            return conflict
+        }
+
+        var replay = cached.response
+        replay.headers["X-Idempotency-Replayed"] = "true"
+        replay.headers["Idempotency-Key"] = idempotencyKey
+        replay.headers["X-Request-ID"] = requestID
+        replay.body = responseBodyWithUpdatedRequestID(replay.body, requestID: requestID)
+        return replay
+    }
+
+    private func finalizeExecuteResponse(
+        idempotencyKey: String?,
+        requestHash: String,
+        response: HTTPResponse,
+        requestID: String
+    ) -> HTTPResponse {
+        var responseWithHeaders = response
+        responseWithHeaders.headers["X-Request-ID"] = requestID
+
+        guard let idempotencyKey else {
+            return responseWithHeaders
+        }
+
+        responseWithHeaders.headers["Idempotency-Key"] = idempotencyKey
+        responseWithHeaders.headers["X-Idempotency-Replayed"] = "false"
+
+        pruneIdempotencyStore(now: .now)
+        idempotencyStore[idempotencyKey] = IdempotencyCacheEntry(
+            requestHash: requestHash,
+            response: responseWithHeaders,
+            createdAt: .now
+        )
+        pruneIdempotencyStore(now: .now)
+        persistIdempotencyStoreToDisk()
+
+        return responseWithHeaders
+    }
+
+    private func pruneIdempotencyStore(now: Date) {
+        idempotencyStore = idempotencyStore.filter { now.timeIntervalSince($0.value.createdAt) <= Self.idempotencyTTL }
+        guard idempotencyStore.count > Self.idempotencyMaxEntries else { return }
+
+        let keysByOldest = idempotencyStore
+            .sorted { lhs, rhs in
+                lhs.value.createdAt < rhs.value.createdAt
+            }
+            .map(\.key)
+
+        let overflow = idempotencyStore.count - Self.idempotencyMaxEntries
+        for key in keysByOldest.prefix(overflow) {
+            idempotencyStore.removeValue(forKey: key)
+        }
+    }
+
+    private func loadIdempotencyStoreFromDisk() {
+        guard let fileURL = idempotencyStoreFileURL() else { return }
+        guard let data = try? Data(contentsOf: fileURL) else { return }
+
+        do {
+            let persisted = try jsonDecoder.decode(PersistedIdempotencyStore.self, from: data)
+            var restored: [String: IdempotencyCacheEntry] = [:]
+
+            for (key, entry) in persisted.entries {
+                guard let body = Data(base64Encoded: entry.response.bodyBase64) else { continue }
+                restored[key] = IdempotencyCacheEntry(
+                    requestHash: entry.requestHash,
+                    response: HTTPResponse(
+                        statusCode: entry.response.statusCode,
+                        headers: entry.response.headers,
+                        body: body
+                    ),
+                    createdAt: entry.createdAt
+                )
+            }
+
+            idempotencyStore = restored
+            pruneIdempotencyStore(now: .now)
+        } catch {
+            lastListenerError = "幂等缓存加载失败：\(error.localizedDescription)"
+            idempotencyStore = [:]
+        }
+    }
+
+    private func persistIdempotencyStoreToDisk() {
+        guard let fileURL = idempotencyStoreFileURL() else { return }
+
+        let persisted = PersistedIdempotencyStore(
+            entries: idempotencyStore.mapValues { entry in
+                PersistedIdempotencyEntry(
+                    requestHash: entry.requestHash,
+                    response: PersistedHTTPResponse(
+                        statusCode: entry.response.statusCode,
+                        headers: entry.response.headers,
+                        bodyBase64: entry.response.body.base64EncodedString()
+                    ),
+                    createdAt: entry.createdAt
+                )
+            }
+        )
+
+        do {
+            let data = try jsonEncoder.encode(persisted)
+            try data.write(to: fileURL, options: [.atomic])
+        } catch {
+            lastListenerError = "幂等缓存保存失败：\(error.localizedDescription)"
+        }
+    }
+
+    private func idempotencyStoreFileURL() -> URL? {
+        do {
+            let runtimeDir = try AttachmentStore.appSupportDirectory()
+                .appendingPathComponent(Self.runtimeFolder, isDirectory: true)
+            try FileManager.default.createDirectory(
+                at: runtimeDir,
+                withIntermediateDirectories: true
+            )
+            return runtimeDir.appendingPathComponent(Self.idempotencyStoreFilename)
+        } catch {
+            lastListenerError = "无法创建 Runtime 存储目录：\(error.localizedDescription)"
+            return nil
+        }
+    }
+
+    private func resolveRequestID(from request: HTTPRequest) -> String {
+        if let provided = request.headers["x-request-id"]?.trimmedNonEmpty {
+            return provided
+        }
+        return "req-\(UUID().uuidString.lowercased())"
+    }
+
+    private func sha256Hex(_ data: Data) -> String {
+        let digest = SHA256.hash(data: data)
+        return digest.map { String(format: "%02x", $0) }.joined()
+    }
+
+    private func responseBodyWithUpdatedRequestID(_ body: Data, requestID: String) -> Data {
+        guard !body.isEmpty else { return body }
+        guard let jsonObject = try? JSONSerialization.jsonObject(with: body, options: []),
+              var dictionary = jsonObject as? [String: Any] else {
+            return body
+        }
+
+        dictionary["requestID"] = requestID
+
+        guard JSONSerialization.isValidJSONObject(dictionary),
+              let updatedBody = try? JSONSerialization.data(withJSONObject: dictionary, options: []) else {
+            return body
+        }
+        return updatedBody
     }
 
     private func fetchDefaultSettings(from modelContext: ModelContext) throws -> AISettings? {
@@ -353,11 +625,15 @@ final class HousekeeperRuntimeService {
         }
     }
 
-    private func errorResponse(statusCode: Int, message: String) -> HTTPResponse {
-        jsonResponse(
+    private func errorResponse(statusCode: Int, message: String, requestID: String? = nil) -> HTTPResponse {
+        var response = jsonResponse(
             statusCode: statusCode,
-            payload: ErrorPayload(ok: false, statusCode: statusCode, message: message)
+            payload: ErrorPayload(ok: false, statusCode: statusCode, message: message, requestID: requestID)
         )
+        if let requestID {
+            response.headers["X-Request-ID"] = requestID
+        }
+        return response
     }
 
     private func bearerToken(from raw: String?) -> String? {
@@ -489,6 +765,7 @@ private struct HousekeeperExecuteRequest: Codable {
 
 private struct HousekeeperExecuteResponse: Codable {
     var ok: Bool
+    var requestID: String
     var status: String
     var message: String
     var clarification: String?
@@ -526,10 +803,50 @@ private struct HousekeeperHealthPayload: Codable {
     var startedAt: Date?
 }
 
+struct HousekeeperRuntimeSnapshot {
+    var port: Int
+    var endpoint: String
+    var isRunning: Bool
+    var isReady: Bool
+    var stateText: String
+    var startedAt: Date?
+    var requestCount: Int
+    var lastRequestAt: Date?
+    var lastRequestPath: String?
+    var lastRequestID: String?
+    var lastResponseStatusCode: Int?
+    var idempotencyEntryCount: Int
+    var tokenRequired: Bool
+    var lastError: String?
+}
+
+private struct IdempotencyCacheEntry {
+    var requestHash: String
+    var response: HTTPResponse
+    var createdAt: Date
+}
+
+private struct PersistedIdempotencyStore: Codable {
+    var entries: [String: PersistedIdempotencyEntry]
+}
+
+private struct PersistedIdempotencyEntry: Codable {
+    var requestHash: String
+    var response: PersistedHTTPResponse
+    var createdAt: Date
+}
+
+private struct PersistedHTTPResponse: Codable {
+    var statusCode: Int
+    var headers: [String: String]
+    var bodyBase64: String
+}
+
 private struct ErrorPayload: Codable {
     var ok: Bool
     var statusCode: Int
     var message: String
+    var requestID: String?
 }
 
 private extension String {

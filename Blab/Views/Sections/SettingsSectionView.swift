@@ -1,6 +1,7 @@
 import SwiftUI
 import SwiftData
 import AppKit
+import Combine
 
 struct SettingsSectionView: View {
     @Environment(\.modelContext) private var modelContext
@@ -12,6 +13,9 @@ struct SettingsSectionView: View {
     @State private var aiTestPrompt = "请用一句话介绍 Blab 的用途。"
     @State private var aiTestResult = ""
     @State private var isTestingAI = false
+    @State private var runtimeSnapshot = HousekeeperRuntimeService.shared.snapshot()
+
+    private let runtimeStatusTimer = Timer.publish(every: 2.0, on: .main, in: .common).autoconnect()
 
     private var aiSettings: AISettings? {
         aiSettingsList.first
@@ -108,6 +112,94 @@ struct SettingsSectionView: View {
                     }
                 }
 
+                EditorCard(
+                    title: "保姆 Runtime",
+                    subtitle: "本地 Runtime 监听与外部调用状态",
+                    systemImage: "person.crop.circle.badge.checkmark"
+                ) {
+                    HStack(alignment: .firstTextBaseline) {
+                        Label(
+                            "状态：\(runtimeSnapshot.stateText)",
+                            systemImage: runtimeSnapshot.isReady ? "checkmark.circle.fill" : "exclamationmark.circle.fill"
+                        )
+                        .foregroundStyle(runtimeSnapshot.isReady ? .green : .orange)
+
+                        Spacer()
+
+                        Text("端口：\(runtimeSnapshot.port)")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    Text("入口：\(runtimeSnapshot.endpoint)")
+                        .font(.caption)
+                        .textSelection(.enabled)
+
+                    Text("启动时间：\(runtimeSnapshot.startedAt.formattedRuntimeDate)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
+                    Text("请求统计：\(runtimeSnapshot.requestCount) 次")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
+                    Text("幂等缓存：\(runtimeSnapshot.idempotencyEntryCount) 条")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+
+                    if let lastPath = runtimeSnapshot.lastRequestPath {
+                        let statusText = runtimeSnapshot.lastResponseStatusCode.map { "（HTTP \($0)）" } ?? ""
+                        Text("最近请求：\(lastPath)\(statusText)")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    if let requestID = runtimeSnapshot.lastRequestID {
+                        Text("最近 Request ID：\(requestID)")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .textSelection(.enabled)
+                    }
+
+                    if let lastAt = runtimeSnapshot.lastRequestAt {
+                        Text("最近请求时间：\(lastAt.formatted(date: .abbreviated, time: .standard))")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    Text(
+                        runtimeSnapshot.tokenRequired
+                            ? "鉴权：已启用 BLAB_HOUSEKEEPER_TOKEN（请求需携带 Token）"
+                            : "鉴权：未配置 Token（仅依赖 127.0.0.1 回环限制）"
+                    )
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                    if let error = runtimeSnapshot.lastError?.trimmingCharacters(in: .whitespacesAndNewlines), !error.isEmpty {
+                        Text("最近错误：\(error)")
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                            .textSelection(.enabled)
+                    }
+
+                    HStack(spacing: 10) {
+                        Button("刷新状态") {
+                            refreshRuntimeSnapshot()
+                        }
+                        .buttonStyle(.bordered)
+
+                        Button("复制健康检查命令") {
+                            copyText(runtimeHealthCommand)
+                        }
+                        .buttonStyle(.bordered)
+
+                        Button("复制执行模板") {
+                            copyText(runtimeExecuteTemplateCommand)
+                        }
+                        .buttonStyle(.bordered)
+                    }
+                }
+
                 if let aiSettings {
                     AISettingsEditor(
                         settings: aiSettings,
@@ -129,6 +221,10 @@ struct SettingsSectionView: View {
             .onAppear {
                 ensureCurrentMemberSelected()
                 ensureAISettingsExists()
+                refreshRuntimeSnapshot()
+            }
+            .onReceive(runtimeStatusTimer) { _ in
+                refreshRuntimeSnapshot()
             }
         }
     }
@@ -196,6 +292,37 @@ struct SettingsSectionView: View {
             modelContext.insert(AISettings())
             try? modelContext.save()
         }
+    }
+
+    private var runtimeHealthCommand: String {
+        "curl -s http://127.0.0.1:\(runtimeSnapshot.port)/housekeeper/health"
+    }
+
+    private var runtimeExecuteTemplateCommand: String {
+        """
+        curl -s -X POST http://127.0.0.1:\(runtimeSnapshot.port)/housekeeper/execute \\
+          -H 'Content-Type: application/json' \\
+          -H 'Idempotency-Key: hk-demo-001' \\
+          -H 'X-Request-ID: req-demo-001' \\
+          -d '{"instruction":"新增成员小王，用户名 wangx","autoExecute":true,"actorUsername":"ben"}'
+        """
+    }
+
+    private func refreshRuntimeSnapshot() {
+        runtimeSnapshot = HousekeeperRuntimeService.shared.snapshot()
+    }
+
+    private func copyText(_ text: String) {
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(text, forType: .string)
+    }
+}
+
+private extension Date? {
+    var formattedRuntimeDate: String {
+        guard let value = self else { return "未记录" }
+        return value.formatted(date: .abbreviated, time: .standard)
     }
 }
 

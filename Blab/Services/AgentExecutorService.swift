@@ -33,7 +33,8 @@ enum AgentExecutorService {
         items: [LabItem],
         locations: [LabLocation],
         events: [LabEvent],
-        members: [Member]
+        members: [Member],
+        requestID: String? = nil
     ) -> AgentExecutionResult {
         var runtimeItems = items
         var runtimeLocations = locations
@@ -51,7 +52,8 @@ enum AgentExecutorService {
                     items: &runtimeItems,
                     locations: &runtimeLocations,
                     events: &runtimeEvents,
-                    members: &runtimeMembers
+                    members: &runtimeMembers,
+                    requestID: requestID
                 )
                 entries.append(
                     AgentExecutionEntry(
@@ -95,7 +97,8 @@ enum AgentExecutorService {
         items: inout [LabItem],
         locations: inout [LabLocation],
         events: inout [LabEvent],
-        members: inout [Member]
+        members: inout [Member],
+        requestID: String?
     ) throws -> String {
         switch operation.entity {
         case .item:
@@ -105,7 +108,8 @@ enum AgentExecutorService {
                 currentMember: currentMember,
                 items: &items,
                 locations: locations,
-                members: members
+                members: members,
+                requestID: requestID
             )
         case .location:
             return try applyLocation(
@@ -113,7 +117,8 @@ enum AgentExecutorService {
                 modelContext: modelContext,
                 currentMember: currentMember,
                 locations: &locations,
-                members: members
+                members: members,
+                requestID: requestID
             )
         case .event:
             return try applyEvent(
@@ -123,14 +128,16 @@ enum AgentExecutorService {
                 events: &events,
                 items: items,
                 locations: locations,
-                members: members
+                members: members,
+                requestID: requestID
             )
         case .member:
             return try applyMember(
                 operation: operation,
                 modelContext: modelContext,
                 currentMember: currentMember,
-                members: &members
+                members: &members,
+                requestID: requestID
             )
         }
     }
@@ -141,7 +148,8 @@ enum AgentExecutorService {
         currentMember: Member?,
         items: inout [LabItem],
         locations: [LabLocation],
-        members: [Member]
+        members: [Member],
+        requestID: String?
     ) throws -> String {
         guard let fields = operation.item else {
             throw executionError("物品操作缺少 item 字段。")
@@ -167,7 +175,7 @@ enum AgentExecutorService {
             modelContext.insert(
                 LabLog(
                     actionType: "AI新增物品",
-                    details: "AI created item \(target.name)",
+                    details: logDetails("AI created item \(target.name)", requestID: requestID),
                     user: currentMember,
                     item: target
                 )
@@ -187,7 +195,7 @@ enum AgentExecutorService {
             modelContext.insert(
                 LabLog(
                     actionType: "AI修改物品",
-                    details: "AI updated item \(target.name)",
+                    details: logDetails("AI updated item \(target.name)", requestID: requestID),
                     user: currentMember,
                     item: target
                 )
@@ -291,7 +299,8 @@ enum AgentExecutorService {
         modelContext: ModelContext,
         currentMember: Member?,
         locations: inout [LabLocation],
-        members: [Member]
+        members: [Member],
+        requestID: String?
     ) throws -> String {
         guard let fields = operation.location else {
             throw executionError("空间操作缺少 location 字段。")
@@ -317,7 +326,7 @@ enum AgentExecutorService {
             modelContext.insert(
                 LabLog(
                     actionType: "AI新增位置",
-                    details: "AI created location \(target.name)",
+                    details: logDetails("AI created location \(target.name)", requestID: requestID),
                     user: currentMember,
                     location: target
                 )
@@ -337,7 +346,7 @@ enum AgentExecutorService {
             modelContext.insert(
                 LabLog(
                     actionType: "AI修改位置",
-                    details: "AI updated location \(target.name)",
+                    details: logDetails("AI updated location \(target.name)", requestID: requestID),
                     user: currentMember,
                     location: target
                 )
@@ -444,7 +453,8 @@ enum AgentExecutorService {
         events: inout [LabEvent],
         items: [LabItem],
         locations: [LabLocation],
-        members: [Member]
+        members: [Member],
+        requestID: String?
     ) throws -> String {
         guard let fields = operation.event else {
             throw executionError("事项操作缺少 event 字段。")
@@ -484,7 +494,7 @@ enum AgentExecutorService {
             modelContext.insert(
                 LabLog(
                     actionType: "AI新增事项",
-                    details: "AI created event \(target.title)",
+                    details: logDetails("AI created event \(target.title)", requestID: requestID),
                     user: currentMember,
                     event: target
                 )
@@ -506,7 +516,7 @@ enum AgentExecutorService {
             modelContext.insert(
                 LabLog(
                     actionType: "AI修改事项",
-                    details: "AI updated event \(target.title)",
+                    details: logDetails("AI updated event \(target.title)", requestID: requestID),
                     user: currentMember,
                     event: target
                 )
@@ -701,7 +711,8 @@ enum AgentExecutorService {
         operation: AgentOperation,
         modelContext: ModelContext,
         currentMember: Member?,
-        members: inout [Member]
+        members: inout [Member],
+        requestID: String?
     ) throws -> String {
         guard let fields = operation.member else {
             throw executionError("成员操作缺少 member 字段。")
@@ -727,7 +738,7 @@ enum AgentExecutorService {
             modelContext.insert(
                 LabLog(
                     actionType: "AI新增成员",
-                    details: "AI created member \(target.displayName)",
+                    details: logDetails("AI created member \(target.displayName)", requestID: requestID),
                     user: currentMember ?? target
                 )
             )
@@ -746,7 +757,7 @@ enum AgentExecutorService {
             modelContext.insert(
                 LabLog(
                     actionType: "AI修改成员",
-                    details: "AI updated member \(target.displayName)",
+                    details: logDetails("AI updated member \(target.displayName)", requestID: requestID),
                     user: currentMember ?? target
                 )
             )
@@ -1397,6 +1408,13 @@ enum AgentExecutorService {
 
     private static func firstRegexGroup(_ pattern: String, in text: String) -> String? {
         regexMatch(pattern, in: text)?[safe: 0]?.trimmedNonEmpty
+    }
+
+    private static func logDetails(_ base: String, requestID: String?) -> String {
+        guard let requestID = requestID?.trimmedNonEmpty else {
+            return base
+        }
+        return "\(base) [request_id=\(requestID)]"
     }
 
     private static func executionError(_ message: String) -> NSError {
