@@ -260,9 +260,11 @@
 				ENABLE_OUTGOING_NETWORK_CONNECTIONS = YES;
 				ENABLE_PREVIEWS = YES;
 				ENABLE_RESOURCE_ACCESS_AUDIO_INPUT = YES;
+				ENABLE_RESOURCE_ACCESS_LOCATION = YES;
 				ENABLE_USER_SELECTED_FILES = readonly;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "Blab uses your location to auto-fill space coordinates when creating or editing a space.";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Blab uses the microphone for voice command input and transcription.";
 				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "Blab uses speech recognition to transcribe voice commands.";
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -297,9 +299,11 @@
 				ENABLE_OUTGOING_NETWORK_CONNECTIONS = YES;
 				ENABLE_PREVIEWS = YES;
 				ENABLE_RESOURCE_ACCESS_AUDIO_INPUT = YES;
+				ENABLE_RESOURCE_ACCESS_LOCATION = YES;
 				ENABLE_USER_SELECTED_FILES = readonly;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "Blab uses your location to auto-fill space coordinates when creating or editing a space.";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Blab uses the microphone for voice command input and transcription.";
 				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "Blab uses speech recognition to transcribe voice commands.";
 				LD_RUNPATH_SEARCH_PATHS = (

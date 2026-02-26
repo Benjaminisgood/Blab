@@ -1,5 +1,6 @@
 import SwiftUI
 import SwiftData
+import CoreLocation
 
 struct LocationsSectionView: View {
     @Environment(\.modelContext) private var modelContext
@@ -388,15 +389,18 @@ private struct LocationEditorSheet: View {
     @State private var detailLink = ""
     @State private var notes = ""
     @State private var detailRefs: [DetailRef] = []
-    @State private var latitudeText = ""
-    @State private var longitudeText = ""
+    @State private var latitude: Double?
+    @State private var longitude: Double?
     @State private var coordinateSource = ""
+    @State private var locationMessage: String?
+    @State private var locationErrorMessage: String?
 
     @State private var removedAttachmentIDs: Set<UUID> = []
     @State private var importedFileURLs: [URL] = []
     @State private var externalURLsText = ""
 
     @State private var alertMessage: String?
+    @StateObject private var systemLocationService = SystemLocationService()
 
     var body: some View {
         NavigationStack {
@@ -478,13 +482,61 @@ private struct LocationEditorSheet: View {
 
                 EditorCard(
                     title: "坐标与链接",
-                    subtitle: "支持经纬度与来源说明",
+                    subtitle: "调用 macOS 系统定位，自动填充经纬度",
                     systemImage: "location.fill"
                 ) {
                     TextField("详情链接", text: $detailLink)
-                    TextField("纬度", text: $latitudeText)
-                    TextField("经度", text: $longitudeText)
-                    TextField("坐标来源（device/map/manual）", text: $coordinateSource)
+
+                    HStack(spacing: 10) {
+                        Button {
+                            requestSystemLocation()
+                        } label: {
+                            Label(
+                                systemLocationService.isRequesting ? "定位中..." : "使用系统定位",
+                                systemImage: systemLocationService.isRequesting ? "location.fill.viewfinder" : "location.circle.fill"
+                            )
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(systemLocationService.isRequesting)
+
+                        if latitude != nil, longitude != nil {
+                            Button("清除坐标", role: .destructive) {
+                                clearCoordinates()
+                            }
+                            .buttonStyle(.bordered)
+                            .disabled(systemLocationService.isRequesting)
+                        }
+                    }
+
+                    if let latitude, let longitude {
+                        Text("纬度：\(latitude.formatted(.number.precision(.fractionLength(6))))")
+                            .font(.caption.monospacedDigit())
+                            .foregroundStyle(.secondary)
+                        Text("经度：\(longitude.formatted(.number.precision(.fractionLength(6))))")
+                            .font(.caption.monospacedDigit())
+                            .foregroundStyle(.secondary)
+                        if !coordinateSource.isEmpty {
+                            Text("坐标来源：\(coordinateSource)")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    } else {
+                        Text("尚未获取坐标。")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    if let locationMessage, !locationMessage.isEmpty {
+                        Text(locationMessage)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    if let locationErrorMessage, !locationErrorMessage.isEmpty {
+                        Text(locationErrorMessage)
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                    }
                 }
 
                 EditorCard(
@@ -566,12 +618,8 @@ private struct LocationEditorSheet: View {
         detailLink = location.detailLink
         notes = location.notes
         detailRefs = location.detailRefsWithoutUsageTags
-        if let latitude = location.latitude {
-            latitudeText = String(latitude)
-        }
-        if let longitude = location.longitude {
-            longitudeText = String(longitude)
-        }
+        latitude = location.latitude
+        longitude = location.longitude
         coordinateSource = location.coordinateSource
     }
 
@@ -619,9 +667,7 @@ private struct LocationEditorSheet: View {
             target.parent = nil
         }
 
-        let latitude = Double(latitudeText.trimmingCharacters(in: .whitespacesAndNewlines))
-        let longitude = Double(longitudeText.trimmingCharacters(in: .whitespacesAndNewlines))
-        if latitude != nil && longitude != nil {
+        if let latitude, let longitude {
             target.latitude = latitude
             target.longitude = longitude
             target.coordinateSource = coordinateSource.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -674,6 +720,31 @@ private struct LocationEditorSheet: View {
         } catch {
             alertMessage = "保存失败：\(error.localizedDescription)"
         }
+    }
+
+    private func requestSystemLocation() {
+        locationMessage = nil
+        locationErrorMessage = nil
+
+        Task { @MainActor in
+            do {
+                let coordinate = try await systemLocationService.requestCurrentCoordinate()
+                latitude = coordinate.latitude
+                longitude = coordinate.longitude
+                coordinateSource = "system-location"
+                locationMessage = "已从系统定位填入坐标。"
+            } catch {
+                locationErrorMessage = error.localizedDescription
+            }
+        }
+    }
+
+    private func clearCoordinates() {
+        latitude = nil
+        longitude = nil
+        coordinateSource = ""
+        locationMessage = nil
+        locationErrorMessage = nil
     }
 
     private func appendAttachmentRefs(_ refs: [String], to location: LabLocation) {

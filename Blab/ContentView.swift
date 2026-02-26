@@ -68,21 +68,54 @@ struct ContentView: View {
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     } else {
-                        Text(currentMember?.displayName ?? "未选择成员")
-                            .font(.subheadline.weight(.semibold))
+                        let selectedMemberID = currentMember?.id.uuidString ?? currentMemberID
 
-                        Picker("活动成员", selection: $currentMemberID) {
+                        Menu {
                             ForEach(members) { member in
-                                Text(member.displayName).tag(member.id.uuidString)
+                                let isCurrent = member.id.uuidString == selectedMemberID
+                                Button {
+                                    currentMemberID = member.id.uuidString
+                                } label: {
+                                    if isCurrent {
+                                        Label(member.displayName, systemImage: "checkmark")
+                                    } else {
+                                        Text(member.displayName)
+                                    }
+                                }
                             }
-                        }
-                        .pickerStyle(.menu)
+                        } label: {
+                            HStack(spacing: 10) {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(currentMember?.displayName ?? "未选择成员")
+                                        .font(.subheadline.weight(.semibold))
 
-                        if let currentMember, !currentMember.username.isEmpty {
-                            Text("@\(currentMember.username)")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
+                                    if let currentMember, !currentMember.username.isEmpty {
+                                        Text("@\(currentMember.username)")
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                    } else {
+                                        Text("点击切换用户")
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                    }
+                                }
+
+                                Spacer(minLength: 8)
+
+                                Image(systemName: "chevron.up.chevron.down")
+                                    .font(.caption2.weight(.semibold))
+                                    .foregroundStyle(.secondary)
+                            }
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 8)
+                            .background(
+                                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                    .fill(Color.secondary.opacity(0.1))
+                            )
                         }
+                        .buttonStyle(.plain)
+                        .menuStyle(.borderlessButton)
+                        .accessibilityLabel("切换活动成员")
                     }
                 }
                 .padding(.horizontal, 14)

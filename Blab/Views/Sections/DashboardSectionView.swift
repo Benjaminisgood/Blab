@@ -105,11 +105,29 @@ struct DashboardSectionView: View {
                     ) {
                         ForEach(ItemStockStatus.allCases.filter { itemAlerts[$0] != nil }, id: \.id) { status in
                             if let entries = itemAlerts[status] {
-                                HStack(alignment: .firstTextBaseline) {
-                                    ItemStatusBadge(status: status)
-                                    Text(String(format: status.alertMessageTemplate, entries.count))
-                                        .font(.subheadline)
-                                        .foregroundStyle(.secondary)
+                                VStack(alignment: .leading, spacing: 8) {
+                                    HStack(alignment: .firstTextBaseline) {
+                                        ItemStatusBadge(status: status)
+                                        Text(String(format: status.alertMessageTemplate, entries.count))
+                                            .font(.subheadline)
+                                            .foregroundStyle(.secondary)
+                                    }
+
+                                    ForEach(entries.sorted { lhs, rhs in
+                                        lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
+                                    }) { item in
+                                        Button {
+                                            routeToAlert(
+                                                makeItemAlertRoute(for: item)
+                                            )
+                                        } label: {
+                                            DashboardAlertJumpRow(
+                                                name: item.name,
+                                                actionLabel: status.alertActionLabel
+                                            )
+                                        }
+                                        .buttonStyle(.plain)
+                                    }
                                 }
                             }
                         }
@@ -124,11 +142,29 @@ struct DashboardSectionView: View {
                     ) {
                         ForEach(LocationStatus.allCases.filter { locationAlerts[$0] != nil }, id: \.id) { status in
                             if let entries = locationAlerts[status] {
-                                HStack(alignment: .firstTextBaseline) {
-                                    LocationStatusBadge(status: status)
-                                    Text(String(format: status.alertMessageTemplate, entries.count))
-                                        .font(.subheadline)
-                                        .foregroundStyle(.secondary)
+                                VStack(alignment: .leading, spacing: 8) {
+                                    HStack(alignment: .firstTextBaseline) {
+                                        LocationStatusBadge(status: status)
+                                        Text(String(format: status.alertMessageTemplate, entries.count))
+                                            .font(.subheadline)
+                                            .foregroundStyle(.secondary)
+                                    }
+
+                                    ForEach(entries.sorted { lhs, rhs in
+                                        lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
+                                    }) { location in
+                                        Button {
+                                            routeToAlert(
+                                                makeLocationAlertRoute(for: location)
+                                            )
+                                        } label: {
+                                            DashboardAlertJumpRow(
+                                                name: location.name,
+                                                actionLabel: status.alertActionLabel
+                                            )
+                                        }
+                                        .buttonStyle(.plain)
+                                    }
                                 }
                             }
                         }
@@ -143,6 +179,49 @@ struct DashboardSectionView: View {
                 startPoint: .topLeading,
                 endPoint: .bottomTrailing
             )
+        )
+    }
+
+    private func makeItemAlertRoute(for item: LabItem) -> AlertNotificationRoute? {
+        guard let member = currentMember,
+              item.canReceiveStatusAlert(member),
+              let status = item.status else {
+            return nil
+        }
+
+        let message = "物品「\(item.name)」状态「\(status.rawValue)」，建议\(status.alertActionLabel)。"
+        return AlertNotificationRoute(
+            memberID: member.id,
+            entity: .item,
+            targetID: item.id,
+            targetName: item.name,
+            message: message
+        )
+    }
+
+    private func makeLocationAlertRoute(for location: LabLocation) -> AlertNotificationRoute? {
+        guard let member = currentMember,
+              location.canReceiveStatusAlert(member),
+              let status = location.status else {
+            return nil
+        }
+
+        let message = "空间「\(location.name)」状态「\(status.rawValue)」，建议\(status.alertActionLabel)。"
+        return AlertNotificationRoute(
+            memberID: member.id,
+            entity: .location,
+            targetID: location.id,
+            targetName: location.name,
+            message: message
+        )
+    }
+
+    private func routeToAlert(_ route: AlertNotificationRoute?) {
+        guard let route else { return }
+        NotificationCenter.default.post(
+            name: .blabAlertNotificationTapped,
+            object: nil,
+            userInfo: route.userInfo
         )
     }
 }
@@ -222,5 +301,29 @@ private struct SummaryCard: View {
                 .strokeBorder(color.opacity(0.22))
         )
         .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+    }
+}
+
+private struct DashboardAlertJumpRow: View {
+    var name: String
+    var actionLabel: String
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Text(name)
+                .font(.subheadline.weight(.medium))
+                .lineLimit(1)
+            Spacer()
+            Text(actionLabel)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Image(systemName: "chevron.right")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.tertiary)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .background(Color.secondary.opacity(0.08))
+        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
     }
 }
