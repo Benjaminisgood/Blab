@@ -1,16 +1,43 @@
 import SwiftUI
 import SwiftData
+import AppKit
 
 struct ContentView: View {
     @Environment(\.modelContext) private var modelContext
     @Query(sort: [SortDescriptor(\Member.name), SortDescriptor(\Member.username)]) private var members: [Member]
+    @Query(sort: [SortDescriptor(\LabItem.name)]) private var items: [LabItem]
+    @Query(sort: [SortDescriptor(\LabLocation.name)]) private var locations: [LabLocation]
 
     @AppStorage("blab.currentMemberID") private var currentMemberID: String = ""
+    @AppStorage("blab.deepLink.memberID") private var deepLinkMemberID: String = ""
+    @AppStorage("blab.deepLink.entity") private var deepLinkEntity: String = ""
+    @AppStorage("blab.deepLink.targetID") private var deepLinkTargetID: String = ""
+    @AppStorage("blab.deepLink.token") private var deepLinkToken: String = ""
 
     @State private var selectedSection: SidebarSection? = .dashboard
 
     private var currentMember: Member? {
         members.first(where: { $0.id.uuidString == currentMemberID }) ?? members.first
+    }
+
+    private var alertFingerprint: String {
+        let itemTokens = items.compactMap { item -> String? in
+            guard let status = item.status, status.isAlert else { return nil }
+            let ownerIDs = item.responsibleMembers.map { $0.id.uuidString }.sorted()
+            guard !ownerIDs.isEmpty else { return nil }
+            return "i|\(item.id.uuidString)|\(status.rawValue)|\(ownerIDs.joined(separator: ","))"
+        }
+        .sorted()
+
+        let locationTokens = locations.compactMap { location -> String? in
+            guard let status = location.status, status.isAlert else { return nil }
+            let ownerIDs = location.responsibleMembers.map { $0.id.uuidString }.sorted()
+            guard !ownerIDs.isEmpty else { return nil }
+            return "l|\(location.id.uuidString)|\(status.rawValue)|\(ownerIDs.joined(separator: ","))"
+        }
+        .sorted()
+
+        return (itemTokens + locationTokens).joined(separator: ";")
     }
 
     var body: some View {
@@ -69,7 +96,38 @@ struct ContentView: View {
                let firstMember = members.first {
                 currentMemberID = firstMember.id.uuidString
             }
+            refreshAlertNotifications()
         }
+        .onChange(of: alertFingerprint) { _, _ in
+            refreshAlertNotifications()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .blabAlertNotificationTapped)) { notification in
+            handleAlertNotificationTap(notification.userInfo)
+        }
+    }
+
+    private func refreshAlertNotifications() {
+        AlertNotificationService.shared.refresh(
+            items: items,
+            locations: locations
+        )
+    }
+
+    private func handleAlertNotificationTap(_ userInfo: [AnyHashable: Any]?) {
+        guard let userInfo,
+              let route = AlertNotificationRoute(userInfo: userInfo) else {
+            return
+        }
+
+        currentMemberID = route.memberID.uuidString
+        selectedSection = route.entity == .item ? .items : .locations
+
+        deepLinkMemberID = route.memberID.uuidString
+        deepLinkEntity = route.entity.rawValue
+        deepLinkTargetID = route.targetID.uuidString
+        deepLinkToken = UUID().uuidString
+
+        NSApp.activate(ignoringOtherApps: true)
     }
 }
 

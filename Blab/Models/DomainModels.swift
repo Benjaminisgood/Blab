@@ -212,6 +212,24 @@ final class LabItem {
         responsibleMembers.sorted(by: { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }).first
     }
 
+    func isResponsible(_ member: Member?) -> Bool {
+        guard let member else { return false }
+        return responsibleMembers.contains(where: { $0.id == member.id })
+    }
+
+    func canEdit(_ member: Member?) -> Bool {
+        if feature == .private {
+            return isResponsible(member)
+        }
+        return true
+    }
+
+    func canReceiveStatusAlert(_ member: Member?) -> Bool {
+        guard status?.isAlert == true else { return false }
+        guard !responsibleMembers.isEmpty else { return false }
+        return isResponsible(member)
+    }
+
     func assignResponsibleMembers(_ members: [Member]) {
         var seen = Set<UUID>()
         let unique = members.filter { member in
@@ -312,6 +330,22 @@ final class LabLocation {
 
     var attachmentRefs: [String] {
         attachments.map(\.filename).filter { !$0.isEmpty }
+    }
+
+    func isResponsible(_ member: Member?) -> Bool {
+        guard let member else { return false }
+        return responsibleMembers.contains(where: { $0.id == member.id })
+    }
+
+    func canEdit(_ member: Member?) -> Bool {
+        guard !responsibleMembers.isEmpty else { return true }
+        return isResponsible(member)
+    }
+
+    func canReceiveStatusAlert(_ member: Member?) -> Bool {
+        guard status?.isAlert == true else { return false }
+        guard !responsibleMembers.isEmpty else { return false }
+        return isResponsible(member)
     }
 
     func setUsageTags(_ tags: [LocationUsageTag]) {

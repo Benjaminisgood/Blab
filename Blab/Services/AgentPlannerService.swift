@@ -8,6 +8,7 @@ struct AgentPlannerMemberContext: Codable {
 struct AgentPlannerContext: Codable {
     var now: Date
     var currentMemberName: String?
+    var currentMemberUsername: String?
     var itemNames: [String]
     var locationNames: [String]
     var eventTitles: [String]
@@ -360,7 +361,12 @@ enum AgentPlannerService {
         }
 
         let prompt = buildPrompt(input: cleanedInput, context: context)
-        let rawReply = try await AIChatService.complete(prompt: prompt, settings: settings, maxTokens: 1400)
+        let rawReply = try await AIChatService.complete(
+            prompt: prompt,
+            settings: settings,
+            maxTokens: 1400,
+            systemPrompt: HousekeeperPromptGuide.plannerPlaybook
+        )
         let plan = try decodePlan(from: rawReply)
         let normalized = normalizePlan(plan)
         let guarded = applyPlanGuard(normalized)
@@ -398,7 +404,12 @@ enum AgentPlannerService {
             failedEntries: failedEntries,
             context: context
         )
-        let rawReply = try await AIChatService.complete(prompt: prompt, settings: settings, maxTokens: 1400)
+        let rawReply = try await AIChatService.complete(
+            prompt: prompt,
+            settings: settings,
+            maxTokens: 1400,
+            systemPrompt: HousekeeperPromptGuide.plannerPlaybook
+        )
         let repaired = try decodePlan(from: rawReply)
         let normalized = normalizePlan(repaired)
         let guarded = applyPlanGuard(normalized)

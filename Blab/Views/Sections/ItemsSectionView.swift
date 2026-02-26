@@ -6,6 +6,10 @@ struct ItemsSectionView: View {
     @Query(sort: [SortDescriptor(\LabItem.name)]) private var items: [LabItem]
     @Query(sort: [SortDescriptor(\Member.name), SortDescriptor(\Member.username)]) private var members: [Member]
     @Query(sort: [SortDescriptor(\LabLocation.name)]) private var locations: [LabLocation]
+    @AppStorage("blab.deepLink.memberID") private var deepLinkMemberID: String = ""
+    @AppStorage("blab.deepLink.entity") private var deepLinkEntity: String = ""
+    @AppStorage("blab.deepLink.targetID") private var deepLinkTargetID: String = ""
+    @AppStorage("blab.deepLink.token") private var deepLinkToken: String = ""
 
     let currentMember: Member?
 
@@ -13,6 +17,7 @@ struct ItemsSectionView: View {
     @State private var presentingCreate = false
     @State private var editingItem: LabItem?
     @State private var deletingItem: LabItem?
+    @State private var consumedDeepLinkToken: String = ""
 
     private var publicCount: Int {
         items.filter { $0.feature == .public }.count
@@ -86,9 +91,11 @@ struct ItemsSectionView: View {
                                 Button("编辑") {
                                     editingItem = item
                                 }
+                                .disabled(!item.canEdit(currentMember))
                                 Button("删除", role: .destructive) {
                                     deletingItem = item
                                 }
+                                .disabled(!item.canEdit(currentMember))
                             }
                             .listRowSeparator(.hidden)
                             .listRowInsets(EdgeInsets(top: 2, leading: 10, bottom: 2, trailing: 10))
@@ -124,6 +131,15 @@ struct ItemsSectionView: View {
         .sheet(item: $editingItem) { item in
             ItemEditorSheet(item: item, members: members, locations: locations, currentMember: currentMember)
         }
+        .onAppear {
+            consumeDeepLinkIfNeeded()
+        }
+        .onChange(of: deepLinkToken) { _, _ in
+            consumeDeepLinkIfNeeded()
+        }
+        .onChange(of: currentMember?.id) { _, _ in
+            consumeDeepLinkIfNeeded()
+        }
         .alert("确认删除物品", isPresented: Binding(get: {
             deletingItem != nil
         }, set: { newValue in
@@ -144,10 +160,7 @@ struct ItemsSectionView: View {
 
     private func performDelete() {
         guard let item = deletingItem else { return }
-
-        if item.feature == .private,
-           let currentMember,
-           !item.responsibleMembers.contains(where: { $0.id == currentMember.id }) {
+        guard item.canEdit(currentMember) else {
             deletingItem = nil
             return
         }
@@ -177,6 +190,34 @@ struct ItemsSectionView: View {
         }
 
         deletingItem = nil
+    }
+
+    private func consumeDeepLinkIfNeeded() {
+        let token = deepLinkToken.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !token.isEmpty else { return }
+        guard token != consumedDeepLinkToken else { return }
+        guard deepLinkEntity == AlertDeepLinkEntity.item.rawValue else { return }
+        guard currentMember?.id.uuidString == deepLinkMemberID else { return }
+
+        consumedDeepLinkToken = token
+        clearDeepLink()
+
+        guard let targetID = UUID(uuidString: deepLinkTargetID),
+              let target = items.first(where: { $0.id == targetID }) else {
+            return
+        }
+
+        searchText = target.name
+        if target.canEdit(currentMember) {
+            editingItem = target
+        }
+    }
+
+    private func clearDeepLink() {
+        deepLinkMemberID = ""
+        deepLinkEntity = ""
+        deepLinkTargetID = ""
+        deepLinkToken = ""
     }
 }
 
@@ -220,6 +261,10 @@ private struct ItemDetailView: View {
 
     @State private var showingEditor = false
 
+    private var canEditItem: Bool {
+        item.canEdit(currentMember)
+    }
+
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
@@ -231,6 +276,7 @@ private struct ItemDetailView: View {
                         showingEditor = true
                     }
                     .buttonStyle(.borderedProminent)
+                    .disabled(!canEditItem)
                 }
 
                 HStack(spacing: 8) {
@@ -543,6 +589,11 @@ private struct ItemEditorSheet: View {
     }
 
     private func save() {
+        if let existing = item, !existing.canEdit(currentMember) {
+            alertMessage = "当前成员无权编辑该私有物品。"
+            return
+        }
+
         let normalizedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !normalizedName.isEmpty else {
             alertMessage = "物品名称不能为空。"
@@ -573,6 +624,12 @@ private struct ItemEditorSheet: View {
             }
         } else {
             target.assignResponsibleMembers(selectedMembers)
+        }
+
+        if feature == .private,
+           target.responsibleMembers.isEmpty {
+            alertMessage = "私人物品至少需要一位负责人。"
+            return
         }
 
         target.locations = locations.filter { selectedLocationIDs.contains($0.id) }

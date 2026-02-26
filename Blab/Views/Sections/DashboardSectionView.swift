@@ -24,7 +24,10 @@ struct DashboardSectionView: View {
     private var itemAlerts: [ItemStockStatus: [LabItem]] {
         var grouped: [ItemStockStatus: [LabItem]] = [:]
         for item in items {
-            guard let status = item.status, status.isAlert else { continue }
+            guard item.canReceiveStatusAlert(currentMember),
+                  let status = item.status else {
+                continue
+            }
             grouped[status, default: []].append(item)
         }
         return grouped
@@ -33,7 +36,10 @@ struct DashboardSectionView: View {
     private var locationAlerts: [LocationStatus: [LabLocation]] {
         var grouped: [LocationStatus: [LabLocation]] = [:]
         for location in locations {
-            guard let status = location.status, status.isAlert else { continue }
+            guard location.canReceiveStatusAlert(currentMember),
+                  let status = location.status else {
+                continue
+            }
             grouped[status, default: []].append(location)
         }
         return grouped

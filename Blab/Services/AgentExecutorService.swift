@@ -197,6 +197,11 @@ enum AgentExecutorService {
                 throw executionError("物品操作缺少 item 字段。")
             }
             let target = try resolveItem(target: operation.target, fallbackName: fields.name, in: items)
+            try ensureCanEditItem(
+                target,
+                currentMember: currentMember,
+                actionLabel: "修改"
+            )
             try patchItem(
                 target: target,
                 fields: fields,
@@ -218,12 +223,7 @@ enum AgentExecutorService {
             let fallbackName = operation.item?.name
             if isBulkDelete(operation: operation, fallbackToken: fallbackName) {
                 let deletable = items.filter { candidate in
-                    if candidate.feature == .private,
-                       let currentMember,
-                       !candidate.responsibleMembers.contains(where: { $0.id == currentMember.id }) {
-                        return false
-                    }
-                    return true
+                    candidate.canEdit(currentMember)
                 }
                 guard !deletable.isEmpty else {
                     throw executionError("当前范围内没有可删除的物品。")
@@ -252,12 +252,11 @@ enum AgentExecutorService {
             }
 
             let target = try resolveItem(target: operation.target, fallbackName: fallbackName, in: items)
-
-            if target.feature == .private,
-               let currentMember,
-               !target.responsibleMembers.contains(where: { $0.id == currentMember.id }) {
-                throw executionError("无权删除该私有物品：\(target.name)")
-            }
+            try ensureCanEditItem(
+                target,
+                currentMember: currentMember,
+                actionLabel: "删除"
+            )
 
             let refs = target.attachmentRefs
             let targetID = target.id
@@ -356,6 +355,11 @@ enum AgentExecutorService {
             target.assignResponsibleMembers([currentMember])
         }
 
+        if (target.feature ?? .private) == .private,
+           target.responsibleMembers.isEmpty {
+            throw executionError("私有物品至少需要一位负责人。")
+        }
+
         if let locationTokens = fields.locationNames {
             target.locations = try resolveLocations(tokens: locationTokens, in: locations)
         }
@@ -411,6 +415,11 @@ enum AgentExecutorService {
                 throw executionError("空间操作缺少 location 字段。")
             }
             let target = try resolveLocation(target: operation.target, fallbackName: fields.name, in: locations)
+            try ensureCanEditLocation(
+                target,
+                currentMember: currentMember,
+                actionLabel: "修改"
+            )
             try patchLocation(
                 target: target,
                 fields: fields,
@@ -432,12 +441,7 @@ enum AgentExecutorService {
             let fallbackName = operation.location?.name
             if isBulkDelete(operation: operation, fallbackToken: fallbackName) {
                 let deletable = locations.filter { location in
-                    if !location.responsibleMembers.isEmpty,
-                       let currentMember,
-                       !location.responsibleMembers.contains(where: { $0.id == currentMember.id }) {
-                        return false
-                    }
-                    return true
+                    location.canEdit(currentMember)
                 }
                 guard !deletable.isEmpty else {
                     throw executionError("当前范围内没有可删除的空间。")
@@ -466,12 +470,11 @@ enum AgentExecutorService {
             }
 
             let target = try resolveLocation(target: operation.target, fallbackName: fallbackName, in: locations)
-
-            if !target.responsibleMembers.isEmpty,
-               let currentMember,
-               !target.responsibleMembers.contains(where: { $0.id == currentMember.id }) {
-                throw executionError("无权删除该空间：\(target.name)")
-            }
+            try ensureCanEditLocation(
+                target,
+                currentMember: currentMember,
+                actionLabel: "删除"
+            )
 
             let refs = target.attachmentRefs
             let targetID = target.id
@@ -553,6 +556,11 @@ enum AgentExecutorService {
                   target.responsibleMembers.isEmpty,
                   let currentMember {
             target.responsibleMembers = [currentMember]
+        }
+
+        if !target.isPublic,
+           target.responsibleMembers.isEmpty {
+            throw executionError("私人空间至少需要一位负责人。")
         }
 
         if fields.detailRefs != nil || fields.usageTags != nil {
@@ -1691,6 +1699,26 @@ enum AgentExecutorService {
             return base
         }
         return "\(base) [request_id=\(requestID)]"
+    }
+
+    private static func ensureCanEditItem(
+        _ target: LabItem,
+        currentMember: Member?,
+        actionLabel: String
+    ) throws {
+        guard target.canEdit(currentMember) else {
+            throw executionError("无权\(actionLabel)该私有物品：\(target.name)")
+        }
+    }
+
+    private static func ensureCanEditLocation(
+        _ target: LabLocation,
+        currentMember: Member?,
+        actionLabel: String
+    ) throws {
+        guard target.canEdit(currentMember) else {
+            throw executionError("无权\(actionLabel)该空间：\(target.name)")
+        }
     }
 
     private static func executionError(_ message: String) -> NSError {

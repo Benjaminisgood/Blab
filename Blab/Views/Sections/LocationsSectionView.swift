@@ -5,6 +5,10 @@ struct LocationsSectionView: View {
     @Environment(\.modelContext) private var modelContext
     @Query(sort: [SortDescriptor(\LabLocation.name)]) private var locations: [LabLocation]
     @Query(sort: [SortDescriptor(\Member.name), SortDescriptor(\Member.username)]) private var members: [Member]
+    @AppStorage("blab.deepLink.memberID") private var deepLinkMemberID: String = ""
+    @AppStorage("blab.deepLink.entity") private var deepLinkEntity: String = ""
+    @AppStorage("blab.deepLink.targetID") private var deepLinkTargetID: String = ""
+    @AppStorage("blab.deepLink.token") private var deepLinkToken: String = ""
 
     let currentMember: Member?
 
@@ -12,6 +16,7 @@ struct LocationsSectionView: View {
     @State private var presentingCreate = false
     @State private var editingLocation: LabLocation?
     @State private var deletingLocation: LabLocation?
+    @State private var consumedDeepLinkToken: String = ""
 
     private var publicCount: Int {
         locations.filter(\.isPublic).count
@@ -90,9 +95,11 @@ struct LocationsSectionView: View {
                                 Button("编辑") {
                                     editingLocation = location
                                 }
+                                .disabled(!location.canEdit(currentMember))
                                 Button("删除", role: .destructive) {
                                     deletingLocation = location
                                 }
+                                .disabled(!location.canEdit(currentMember))
                             }
                             .listRowSeparator(.hidden)
                             .listRowInsets(EdgeInsets(top: 2, leading: 10, bottom: 2, trailing: 10))
@@ -128,6 +135,15 @@ struct LocationsSectionView: View {
         .sheet(item: $editingLocation) { location in
             LocationEditorSheet(location: location, allLocations: locations, members: members, currentMember: currentMember)
         }
+        .onAppear {
+            consumeDeepLinkIfNeeded()
+        }
+        .onChange(of: deepLinkToken) { _, _ in
+            consumeDeepLinkIfNeeded()
+        }
+        .onChange(of: currentMember?.id) { _, _ in
+            consumeDeepLinkIfNeeded()
+        }
         .alert("确认删除空间", isPresented: Binding(get: {
             deletingLocation != nil
         }, set: { newValue in
@@ -148,10 +164,7 @@ struct LocationsSectionView: View {
 
     private func performDelete() {
         guard let location = deletingLocation else { return }
-
-        if !location.responsibleMembers.isEmpty,
-           let currentMember,
-           !location.responsibleMembers.contains(where: { $0.id == currentMember.id }) {
+        guard location.canEdit(currentMember) else {
             deletingLocation = nil
             return
         }
@@ -175,6 +188,34 @@ struct LocationsSectionView: View {
         }
 
         deletingLocation = nil
+    }
+
+    private func consumeDeepLinkIfNeeded() {
+        let token = deepLinkToken.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !token.isEmpty else { return }
+        guard token != consumedDeepLinkToken else { return }
+        guard deepLinkEntity == AlertDeepLinkEntity.location.rawValue else { return }
+        guard currentMember?.id.uuidString == deepLinkMemberID else { return }
+
+        consumedDeepLinkToken = token
+        clearDeepLink()
+
+        guard let targetID = UUID(uuidString: deepLinkTargetID),
+              let target = locations.first(where: { $0.id == targetID }) else {
+            return
+        }
+
+        searchText = target.name
+        if target.canEdit(currentMember) {
+            editingLocation = target
+        }
+    }
+
+    private func clearDeepLink() {
+        deepLinkMemberID = ""
+        deepLinkEntity = ""
+        deepLinkTargetID = ""
+        deepLinkToken = ""
     }
 }
 
@@ -217,6 +258,10 @@ private struct LocationDetailView: View {
 
     @State private var showingEditor = false
 
+    private var canEditLocation: Bool {
+        location.canEdit(currentMember)
+    }
+
     private var bundle: EventSummaryBundle {
         EventSummaryBundle.build(from: location.events)
     }
@@ -232,6 +277,7 @@ private struct LocationDetailView: View {
                         showingEditor = true
                     }
                     .buttonStyle(.borderedProminent)
+                    .disabled(!canEditLocation)
                 }
 
                 HStack(spacing: 8) {
@@ -530,6 +576,11 @@ private struct LocationEditorSheet: View {
     }
 
     private func save() {
+        if let existing = location, !existing.canEdit(currentMember) {
+            alertMessage = "当前成员无权编辑该空间。"
+            return
+        }
+
         let normalizedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !normalizedName.isEmpty else {
             alertMessage = "空间名称不能为空。"
@@ -553,6 +604,12 @@ private struct LocationEditorSheet: View {
             target.responsibleMembers = [currentMember]
         } else {
             target.responsibleMembers = selectedMembers
+        }
+
+        if !isPublic,
+           target.responsibleMembers.isEmpty {
+            alertMessage = "私人空间至少需要一位负责人。"
+            return
         }
 
         if let parentID,

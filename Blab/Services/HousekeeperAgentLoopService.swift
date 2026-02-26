@@ -16,6 +16,21 @@ struct HousekeeperAgentLoopResult {
     var stats: HousekeeperAgentLoopStats
 }
 
+struct HousekeeperLoopSelfCheckReport: Codable {
+    var generatedAt: Date
+    var entries: [HousekeeperLoopSelfCheckEntry]
+
+    var ok: Bool {
+        entries.allSatisfy(\.passed)
+    }
+}
+
+struct HousekeeperLoopSelfCheckEntry: Codable {
+    var name: String
+    var passed: Bool
+    var detail: String
+}
+
 enum HousekeeperAgentLoopService {
     private static let maxSameToolCall = 2
     private static let maxTraceLines = 40
@@ -77,6 +92,23 @@ enum HousekeeperAgentLoopService {
         )
     }
 
+    static func selfCheckReport() -> HousekeeperLoopSelfCheckReport {
+        var entries: [HousekeeperLoopSelfCheckEntry] = []
+
+        entries.append(checkDecisionDecodeDirectJSON())
+        entries.append(checkDecisionDecodeFencedJSON())
+        entries.append(checkDecisionDecodeEmbeddedJSONBlock())
+        entries.append(checkDecisionDecodeRejectsInvalidPayload())
+        entries.append(checkLoopGuardRepeatedToolBlocking())
+        entries.append(checkLoopGuardMaxRoundsFallback())
+        entries.append(checkLoopToolRegistryConsistency())
+
+        return HousekeeperLoopSelfCheckReport(
+            generatedAt: .now,
+            entries: entries
+        )
+    }
+
     private static func runLoop(
         instruction: String,
         settings: AISettings,
@@ -113,6 +145,7 @@ enum HousekeeperAgentLoopService {
         if let readOnlyPlan = buildReadOnlyPlanIfNeeded(
             instruction: cleanedInstruction,
             currentMemberName: context.currentMemberName,
+            currentMemberUsername: context.currentMemberUsername,
             items: items,
             locations: locations,
             events: events,
@@ -135,7 +168,12 @@ enum HousekeeperAgentLoopService {
                 maxSteps: boundedMaxSteps
             )
 
-            let rawReply = try await AIChatService.complete(prompt: loopPrompt, settings: settings, maxTokens: 700)
+            let rawReply = try await AIChatService.complete(
+                prompt: loopPrompt,
+                settings: settings,
+                maxTokens: 700,
+                systemPrompt: HousekeeperPromptGuide.dispatcherPlaybook
+            )
             guard let decision = await decodeDecisionWithRepair(
                 rawReply: rawReply,
                 settings: settings,
@@ -175,17 +213,24 @@ enum HousekeeperAgentLoopService {
                     appendTrace(&trace, "第\(step)轮：\(reason)")
                     continue
                 }
-
-                if let validationError = validateToolDecision(toolName: toolName, decision: decision) {
+                guard let tool = LoopTool(rawValue: toolName) else {
                     stats.invalidDecisionCount += 1
-                    let reason = "tool_validation_error(tool=\(toolName)): \(validationError)"
+                    let reason = "tool_validation_error: 不支持的 tool=\(toolName)"
+                    observations.append(reason)
+                    appendTrace(&trace, "第\(step)轮：\(reason)")
+                    continue
+                }
+
+                if let validationError = validateToolDecision(tool: tool, decision: decision) {
+                    stats.invalidDecisionCount += 1
+                    let reason = "tool_validation_error(tool=\(tool.rawValue)): \(validationError)"
                     observations.append(reason)
                     appendTrace(&trace, "第\(step)轮：\(reason)")
                     continue
                 }
 
                 let signature = toolSignature(
-                    name: toolName,
+                    name: tool.rawValue,
                     query: decision.query,
                     target: decision.target,
                     entity: decision.entity,
@@ -195,7 +240,7 @@ enum HousekeeperAgentLoopService {
                 repeatedCallCounter[signature] = callCount
 
                 if callCount > maxSameToolCall {
-                    if toolName.hasPrefix("search_"),
+                    if tool.isSearchTool,
                        shouldFastTrackCreatePlanning(for: cleanedInstruction) {
                         appendTrace(&trace, "第\(step)轮：重复检索被拦截，检测到新增意图，直接进入\(phaseLabel(for: mode))。")
                         let enrichedInstruction = enrichInstruction(cleanedInstruction, observations: observations)
@@ -218,12 +263,12 @@ enum HousekeeperAgentLoopService {
                 }
 
                 let outcome = executeTool(
-                    name: toolName,
+                    tool: tool,
                     query: decision.query,
                     target: decision.target,
-                    entity: decision.entity,
                     limit: decision.limit,
                     currentMemberName: context.currentMemberName,
+                    currentMemberUsername: context.currentMemberUsername,
                     items: items,
                     locations: locations,
                     events: events,
@@ -236,7 +281,7 @@ enum HousekeeperAgentLoopService {
                 observations.append(outcome.observation)
                 appendTrace(&trace, "第\(step)轮：\(outcome.brief)")
 
-                if toolName.hasPrefix("search_"),
+                if tool.isSearchTool,
                    outcome.isEmptyResult,
                    shouldFastTrackCreatePlanning(for: cleanedInstruction) {
                     appendTrace(&trace, "第\(step)轮：检索为空且输入是新增意图，直接进入\(phaseLabel(for: mode))。")
@@ -305,6 +350,8 @@ enum HousekeeperAgentLoopService {
         maxSteps: Int
     ) -> String {
         let contextJSON = encodeJSONString(context)
+        let toolSchemaTokenList = LoopTool.schemaTokenList
+        let toolCatalogText = LoopTool.catalogPromptText
         let boundedObservations = Array(observations.suffix(maxObservationCount))
         let observationText: String
         if boundedObservations.isEmpty {
@@ -333,13 +380,16 @@ enum HousekeeperAgentLoopService {
 JSON Schema：
 {
   "type": "tool|plan|clarification",
-  "tool": "search_items|search_locations|search_events|search_members|get_item|get_location|get_event|get_member",
+  "tool": "\(toolSchemaTokenList)",
   "query": "字符串，可选（search_* 推荐填写关键词；全量查询可留空）",
   "target": "字符串，可选（get_* 必填）",
   "entity": "item|location|event|member，可选",
   "limit": 1-50 的整数，可选，默认 5,
   "clarification": "当 type=clarification 时必填"
 }
+
+工具目录（单一注册表）：
+\(toolCatalogText)
 
 决策规则：
 - 如果目标对象不明确或可能重名，优先 tool。
@@ -362,12 +412,12 @@ JSON Schema：
     }
 
     private static func executeTool(
-        name: String,
+        tool: LoopTool,
         query: String?,
         target: String?,
-        entity: String?,
         limit: Int?,
         currentMemberName: String?,
+        currentMemberUsername: String?,
         items: [LabItem],
         locations: [LabLocation],
         events: [LabEvent],
@@ -375,14 +425,15 @@ JSON Schema：
     ) -> ToolExecutionOutcome {
         let safeLimit = clampSearchLimit(limit)
 
-        switch name {
-        case "search_items":
+        switch tool {
+        case .searchItems:
             let q = query?.trimmed ?? ""
             let results = searchItems(
                 query: q,
                 items: items,
                 limit: safeLimit,
-                currentMemberName: currentMemberName
+                currentMemberName: currentMemberName,
+                currentMemberUsername: currentMemberUsername
             )
             return ToolExecutionOutcome(
                 observation: "search_items(query=\(q), limit=\(safeLimit)) => \(encodeJSONString(results))",
@@ -390,7 +441,7 @@ JSON Schema：
                 resultCount: results.count
             )
 
-        case "search_locations":
+        case .searchLocations:
             let q = query?.trimmed ?? ""
             let results = searchLocations(query: q, locations: locations, limit: safeLimit)
             return ToolExecutionOutcome(
@@ -399,7 +450,7 @@ JSON Schema：
                 resultCount: results.count
             )
 
-        case "search_events":
+        case .searchEvents:
             let q = query?.trimmed ?? ""
             let results = searchEvents(query: q, events: events, limit: safeLimit)
             return ToolExecutionOutcome(
@@ -408,7 +459,7 @@ JSON Schema：
                 resultCount: results.count
             )
 
-        case "search_members":
+        case .searchMembers:
             let q = query?.trimmed ?? ""
             let results = searchMembers(query: q, members: members, limit: safeLimit)
             return ToolExecutionOutcome(
@@ -417,7 +468,7 @@ JSON Schema：
                 resultCount: results.count
             )
 
-        case "get_item":
+        case .getItem:
             let token = target?.trimmedNonEmpty ?? query?.trimmedNonEmpty ?? ""
             let result = getItem(token: token, items: items)
             return ToolExecutionOutcome(
@@ -426,7 +477,7 @@ JSON Schema：
                 resultCount: result == nil ? 0 : 1
             )
 
-        case "get_location":
+        case .getLocation:
             let token = target?.trimmedNonEmpty ?? query?.trimmedNonEmpty ?? ""
             let result = getLocation(token: token, locations: locations)
             return ToolExecutionOutcome(
@@ -435,7 +486,7 @@ JSON Schema：
                 resultCount: result == nil ? 0 : 1
             )
 
-        case "get_event":
+        case .getEvent:
             let token = target?.trimmedNonEmpty ?? query?.trimmedNonEmpty ?? ""
             let result = getEvent(token: token, events: events)
             return ToolExecutionOutcome(
@@ -444,21 +495,13 @@ JSON Schema：
                 resultCount: result == nil ? 0 : 1
             )
 
-        case "get_member":
+        case .getMember:
             let token = target?.trimmedNonEmpty ?? query?.trimmedNonEmpty ?? ""
             let result = getMember(token: token, members: members)
             return ToolExecutionOutcome(
                 observation: "get_member(target=\(token)) => \(encodeJSONString(result))",
                 brief: "tool=get_member found=\(result == nil ? 0 : 1)",
                 resultCount: result == nil ? 0 : 1
-            )
-
-        default:
-            let fallbackEntity = entity ?? "unknown"
-            return ToolExecutionOutcome(
-                observation: "unsupported_tool(name=\(name), entity=\(fallbackEntity)) => []",
-                brief: "tool=\(name) unsupported",
-                resultCount: 0
             )
         }
     }
@@ -467,12 +510,18 @@ JSON Schema：
         query: String,
         items: [LabItem],
         limit: Int,
-        currentMemberName: String?
+        currentMemberName: String?,
+        currentMemberUsername: String?
     ) -> [ItemDigest] {
         let profile = parseItemSearchProfile(query)
         let effectiveLimit = effectiveSearchLimit(baseLimit: limit, prefersBroadResult: profile.prefersBroadResult)
         let filtered = items.filter { item in
-            if profile.ownOnly, !matchesCurrentMember(item: item, currentMemberName: currentMemberName) {
+            if profile.ownOnly,
+               !matchesCurrentMember(
+                item: item,
+                currentMemberName: currentMemberName,
+                currentMemberUsername: currentMemberUsername
+               ) {
                 return false
             }
             if let feature = profile.featureFilter, item.feature != feature {
@@ -753,18 +802,13 @@ JSON Schema：
         .joined(separator: "|")
     }
 
-    private static func validateToolDecision(toolName: String, decision: LoopDecision) -> String? {
-        switch toolName {
-        case "search_items", "search_locations", "search_events", "search_members":
-            return nil
-        case "get_item", "get_location", "get_event", "get_member":
+    private static func validateToolDecision(tool: LoopTool, decision: LoopDecision) -> String? {
+        if tool.requiresTarget {
             guard decision.target?.trimmedNonEmpty != nil || decision.query?.trimmedNonEmpty != nil else {
-                return "\(toolName) 缺少 target（或 query 兜底）。"
+                return "\(tool.rawValue) 缺少 target（或 query 兜底）。"
             }
-            return nil
-        default:
-            return nil
         }
+        return nil
     }
 
     private static func decodeDecisionWithRepair(
@@ -778,6 +822,9 @@ JSON Schema：
             return direct
         }
 
+        let toolSchemaTokenList = LoopTool.schemaTokenList
+        let toolCatalogText = LoopTool.catalogPromptText
+
         stats.invalidDecisionCount += 1
         appendTrace(&trace, "第\(step)轮：决策 JSON 解析失败，尝试自动修复。")
 
@@ -785,13 +832,16 @@ JSON Schema：
 你上一条输出不是合法 JSON。请修复为一个严格符合以下 schema 的 JSON，并且只输出 JSON：
 {
   "type": "tool|plan|clarification",
-  "tool": "search_items|search_locations|search_events|search_members|get_item|get_location|get_event|get_member",
+  "tool": "\(toolSchemaTokenList)",
   "query": "字符串，可选（search_* 推荐填写关键词；全量查询可留空）",
   "target": "字符串，可选（get_* 必填）",
   "entity": "item|location|event|member，可选",
   "limit": 1-50 的整数，可选，默认 5,
   "clarification": "当 type=clarification 时必填"
 }
+
+工具目录（单一注册表）：
+\(toolCatalogText)
 
 原始输出：
 \(rawReply)
@@ -800,7 +850,8 @@ JSON Schema：
         guard let repairedReply = try? await AIChatService.complete(
             prompt: repairPrompt,
             settings: settings,
-            maxTokens: 240
+            maxTokens: 240,
+            systemPrompt: HousekeeperPromptGuide.dispatcherPlaybook
         ),
         let repairedDecision = try? decodeDecision(from: repairedReply) else {
             appendTrace(&trace, "第\(step)轮：决策修复失败，跳过本轮并继续。")
@@ -954,6 +1005,7 @@ JSON Schema：
     private static func buildReadOnlyPlanIfNeeded(
         instruction: String,
         currentMemberName: String?,
+        currentMemberUsername: String?,
         items: [LabItem],
         locations: [LabLocation],
         events: [LabEvent],
@@ -971,7 +1023,8 @@ JSON Schema：
                 query: instruction,
                 items: items,
                 limit: maxSearchLimit,
-                currentMemberName: currentMemberName
+                currentMemberName: currentMemberName,
+                currentMemberUsername: currentMemberUsername
             )
             return AgentPlan(operations: [], clarification: formatItemReadResult(results))
         case .location:
@@ -1123,19 +1176,52 @@ JSON Schema：
         return -1
     }
 
-    private static func matchesCurrentMember(item: LabItem, currentMemberName: String?) -> Bool {
-        guard let memberToken = currentMemberName?.normalizedToken,
-              !memberToken.isEmpty else {
+    private static func matchesCurrentMember(
+        item: LabItem,
+        currentMemberName: String?,
+        currentMemberUsername: String?
+    ) -> Bool {
+        let nameToken = currentMemberName?.normalizedToken ?? ""
+        let usernameToken = currentMemberUsername?.normalizedToken ?? ""
+        if nameToken.isEmpty && usernameToken.isEmpty {
             return true
         }
         return item.responsibleMembers.contains { member in
-            let name = member.displayName.normalizedToken
-            let username = member.username.normalizedToken
-            return name == memberToken
-                || username == memberToken
-                || name.contains(memberToken)
-                || memberToken.contains(name)
+            memberMatchesCurrent(
+                member: member,
+                currentMemberName: currentMemberName,
+                currentMemberUsername: currentMemberUsername
+            )
         }
+    }
+
+    private static func memberMatchesCurrent(
+        member: Member,
+        currentMemberName: String?,
+        currentMemberUsername: String?
+    ) -> Bool {
+        let nameToken = currentMemberName?.normalizedToken ?? ""
+        let usernameToken = currentMemberUsername?.normalizedToken ?? ""
+        let memberName = member.displayName.normalizedToken
+        let memberUsername = member.username.normalizedToken
+
+        if !usernameToken.isEmpty {
+            if memberUsername == usernameToken
+                || memberUsername.contains(usernameToken)
+                || usernameToken.contains(memberUsername) {
+                return true
+            }
+        }
+
+        if !nameToken.isEmpty {
+            if memberName == nameToken
+                || memberName.contains(nameToken)
+                || nameToken.contains(memberName) {
+                return true
+            }
+        }
+
+        return false
     }
 
     private static func shouldFastTrackCreatePlanning(for instruction: String) -> Bool {
@@ -1224,6 +1310,252 @@ JSON Schema：
         }
         return String(line.prefix(maxTraceLineCharacters)) + "..."
     }
+
+    private static func checkDecisionDecodeDirectJSON() -> HousekeeperLoopSelfCheckEntry {
+        let payload = #"{"type":"tool","tool":"search_items","query":"示波器","limit":3}"#
+        do {
+            let decoded = try decodeDecision(from: payload)
+            let passed = decoded.type == .tool
+                && decoded.tool == LoopTool.searchItems.rawValue
+                && decoded.query == "示波器"
+                && decoded.limit == 3
+            return HousekeeperLoopSelfCheckEntry(
+                name: "decision_decode_direct_json",
+                passed: passed,
+                detail: passed ? "ok" : "字段解析结果与预期不一致。"
+            )
+        } catch {
+            return HousekeeperLoopSelfCheckEntry(
+                name: "decision_decode_direct_json",
+                passed: false,
+                detail: "解析失败：\(error.localizedDescription)"
+            )
+        }
+    }
+
+    private static func checkDecisionDecodeFencedJSON() -> HousekeeperLoopSelfCheckEntry {
+        let payload = """
+```json
+{"type":"plan"}
+```
+"""
+        do {
+            let decoded = try decodeDecision(from: payload)
+            let passed = decoded.type == .plan
+            return HousekeeperLoopSelfCheckEntry(
+                name: "decision_decode_fenced_json",
+                passed: passed,
+                detail: passed ? "ok" : "fenced JSON 未被正确提取。"
+            )
+        } catch {
+            return HousekeeperLoopSelfCheckEntry(
+                name: "decision_decode_fenced_json",
+                passed: false,
+                detail: "解析失败：\(error.localizedDescription)"
+            )
+        }
+    }
+
+    private static func checkDecisionDecodeEmbeddedJSONBlock() -> HousekeeperLoopSelfCheckEntry {
+        let payload = """
+输出如下：
+{
+  "type": "clarification",
+  "clarification": "请补充目标名称"
+}
+谢谢。
+"""
+        do {
+            let decoded = try decodeDecision(from: payload)
+            let passed = decoded.type == .clarification
+                && decoded.clarification == "请补充目标名称"
+            return HousekeeperLoopSelfCheckEntry(
+                name: "decision_decode_embedded_block",
+                passed: passed,
+                detail: passed ? "ok" : "嵌入 JSON 块提取结果不正确。"
+            )
+        } catch {
+            return HousekeeperLoopSelfCheckEntry(
+                name: "decision_decode_embedded_block",
+                passed: false,
+                detail: "解析失败：\(error.localizedDescription)"
+            )
+        }
+    }
+
+    private static func checkDecisionDecodeRejectsInvalidPayload() -> HousekeeperLoopSelfCheckEntry {
+        let invalidPayload = #"{"type":"unknown","tool":"search_items"}"#
+        do {
+            _ = try decodeDecision(from: invalidPayload)
+            return HousekeeperLoopSelfCheckEntry(
+                name: "decision_decode_reject_invalid",
+                passed: false,
+                detail: "非法 payload 被错误接受。"
+            )
+        } catch {
+            return HousekeeperLoopSelfCheckEntry(
+                name: "decision_decode_reject_invalid",
+                passed: true,
+                detail: "ok"
+            )
+        }
+    }
+
+    private static func checkLoopGuardRepeatedToolBlocking() -> HousekeeperLoopSelfCheckEntry {
+        let decisions = [
+            LoopDecision(type: .tool, tool: LoopTool.searchItems.rawValue, query: "示波器", target: nil, entity: .none, limit: 5, clarification: nil),
+            LoopDecision(type: .tool, tool: LoopTool.searchItems.rawValue, query: "示波器", target: nil, entity: .none, limit: 5, clarification: nil),
+            LoopDecision(type: .tool, tool: LoopTool.searchItems.rawValue, query: "示波器", target: nil, entity: .none, limit: 5, clarification: nil)
+        ]
+        let outcome = simulateLoopGuards(
+            instruction: "查询示波器信息",
+            decisions: decisions,
+            maxSteps: 6
+        )
+
+        let passed = outcome.repeatedToolBlocked
+            && !outcome.usedFallbackPlan
+            && outcome.rounds == 3
+        return HousekeeperLoopSelfCheckEntry(
+            name: "loop_guard_repeated_tool_blocking",
+            passed: passed,
+            detail: passed
+                ? "ok"
+                : "expected repeated block at round=3, got blocked=\(outcome.repeatedToolBlocked), fallback=\(outcome.usedFallbackPlan), rounds=\(outcome.rounds)"
+        )
+    }
+
+    private static func checkLoopGuardMaxRoundsFallback() -> HousekeeperLoopSelfCheckEntry {
+        let decisions = [
+            LoopDecision(type: .tool, tool: LoopTool.searchItems.rawValue, query: "A", target: nil, entity: .none, limit: 5, clarification: nil),
+            LoopDecision(type: .tool, tool: LoopTool.searchLocations.rawValue, query: "A", target: nil, entity: .none, limit: 5, clarification: nil)
+        ]
+        let outcome = simulateLoopGuards(
+            instruction: "查询相关信息",
+            decisions: decisions,
+            maxSteps: 2
+        )
+
+        let passed = !outcome.repeatedToolBlocked
+            && outcome.usedFallbackPlan
+            && outcome.rounds == 2
+        return HousekeeperLoopSelfCheckEntry(
+            name: "loop_guard_max_rounds_fallback",
+            passed: passed,
+            detail: passed
+                ? "ok"
+                : "expected fallback at round=2, got blocked=\(outcome.repeatedToolBlocked), fallback=\(outcome.usedFallbackPlan), rounds=\(outcome.rounds)"
+        )
+    }
+
+    private static func checkLoopToolRegistryConsistency() -> HousekeeperLoopSelfCheckEntry {
+        let schemaTokens = LoopTool.schemaTokenList
+            .split(separator: "|")
+            .map(String.init)
+        let schemaSet = Set(schemaTokens)
+        let caseSet = Set(LoopTool.allCases.map(\.rawValue))
+
+        let hasDuplicateSchemaToken = schemaTokens.count != schemaSet.count
+        let missingInSchema = caseSet.subtracting(schemaSet)
+        let extraInSchema = schemaSet.subtracting(caseSet)
+        let invalidToolMeta = LoopTool.allCases.filter { tool in
+            let expectedIsSearch = tool.rawValue.hasPrefix("search_")
+            let expectedRequiresTarget = tool.rawValue.hasPrefix("get_")
+            let hasDescription = tool.description.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+            return tool.isSearchTool != expectedIsSearch
+                || tool.requiresTarget != expectedRequiresTarget
+                || !hasDescription
+        }
+
+        let passed = !hasDuplicateSchemaToken
+            && missingInSchema.isEmpty
+            && extraInSchema.isEmpty
+            && invalidToolMeta.isEmpty
+
+        var detailParts: [String] = []
+        if hasDuplicateSchemaToken {
+            detailParts.append("schema 中存在重复 tool token")
+        }
+        if !missingInSchema.isEmpty {
+            detailParts.append("schema 缺少：\(missingInSchema.sorted().joined(separator: ","))")
+        }
+        if !extraInSchema.isEmpty {
+            detailParts.append("schema 多余：\(extraInSchema.sorted().joined(separator: ","))")
+        }
+        if !invalidToolMeta.isEmpty {
+            detailParts.append("tool 元信息不一致：\(invalidToolMeta.map(\.rawValue).joined(separator: ","))")
+        }
+
+        return HousekeeperLoopSelfCheckEntry(
+            name: "loop_tool_registry_consistency",
+            passed: passed,
+            detail: passed ? "ok" : detailParts.joined(separator: "；")
+        )
+    }
+
+    private static func simulateLoopGuards(
+        instruction: String,
+        decisions: [LoopDecision],
+        maxSteps: Int
+    ) -> LoopGuardSimulationOutcome {
+        let boundedSteps = max(1, maxSteps)
+        var repeatedCallCounter: [String: Int] = [:]
+
+        for step in 1...boundedSteps {
+            guard step <= decisions.count else {
+                continue
+            }
+
+            let decision = decisions[step - 1]
+            switch decision.type {
+            case .plan, .clarification:
+                return LoopGuardSimulationOutcome(
+                    repeatedToolBlocked: false,
+                    usedFallbackPlan: false,
+                    rounds: step
+                )
+            case .tool:
+                guard let toolName = decision.tool?.trimmedNonEmpty,
+                      let tool = LoopTool(rawValue: toolName) else {
+                    continue
+                }
+                if validateToolDecision(tool: tool, decision: decision) != nil {
+                    continue
+                }
+
+                let signature = toolSignature(
+                    name: tool.rawValue,
+                    query: decision.query,
+                    target: decision.target,
+                    entity: decision.entity,
+                    limit: decision.limit
+                )
+                let callCount = repeatedCallCounter[signature, default: 0] + 1
+                repeatedCallCounter[signature] = callCount
+
+                if callCount > maxSameToolCall {
+                    if tool.isSearchTool && shouldFastTrackCreatePlanning(for: instruction) {
+                        return LoopGuardSimulationOutcome(
+                            repeatedToolBlocked: false,
+                            usedFallbackPlan: false,
+                            rounds: step
+                        )
+                    }
+                    return LoopGuardSimulationOutcome(
+                        repeatedToolBlocked: true,
+                        usedFallbackPlan: false,
+                        rounds: step
+                    )
+                }
+            }
+        }
+
+        return LoopGuardSimulationOutcome(
+            repeatedToolBlocked: false,
+            usedFallbackPlan: true,
+            rounds: boundedSteps
+        )
+    }
 }
 
 private struct LoopDecision: Codable {
@@ -1286,6 +1618,12 @@ private struct ToolExecutionOutcome {
     }
 }
 
+private struct LoopGuardSimulationOutcome {
+    var repeatedToolBlocked: Bool
+    var usedFallbackPlan: Bool
+    var rounds: Int
+}
+
 private struct SearchQueryProfile {
     var combinedToken: String
     var terms: [String]
@@ -1308,6 +1646,59 @@ private enum ReadOnlyEntity {
 private enum FinalizationMode {
     case planning
     case repair(previousPlan: AgentPlan, failedEntries: [AgentExecutionEntry])
+}
+
+private enum LoopTool: String, CaseIterable {
+    case searchItems = "search_items"
+    case searchLocations = "search_locations"
+    case searchEvents = "search_events"
+    case searchMembers = "search_members"
+    case getItem = "get_item"
+    case getLocation = "get_location"
+    case getEvent = "get_event"
+    case getMember = "get_member"
+
+    static var schemaTokenList: String {
+        allCases.map(\.rawValue).joined(separator: "|")
+    }
+
+    static var catalogPromptText: String {
+        allCases.map { "- \($0.rawValue): \($0.description)" }.joined(separator: "\n")
+    }
+
+    var isSearchTool: Bool {
+        switch self {
+        case .searchItems, .searchLocations, .searchEvents, .searchMembers:
+            return true
+        case .getItem, .getLocation, .getEvent, .getMember:
+            return false
+        }
+    }
+
+    var requiresTarget: Bool {
+        !isSearchTool
+    }
+
+    var description: String {
+        switch self {
+        case .searchItems:
+            return "按关键词检索物品列表"
+        case .searchLocations:
+            return "按关键词检索空间列表"
+        case .searchEvents:
+            return "按关键词检索事项列表"
+        case .searchMembers:
+            return "按关键词检索成员列表"
+        case .getItem:
+            return "按 id 或名称精确获取单个物品"
+        case .getLocation:
+            return "按 id 或名称精确获取单个空间"
+        case .getEvent:
+            return "按 id 或标题精确获取单个事项"
+        case .getMember:
+            return "按 id、用户名或姓名精确获取单个成员"
+        }
+    }
 }
 
 private extension String {

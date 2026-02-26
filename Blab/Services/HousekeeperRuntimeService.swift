@@ -216,6 +216,8 @@ final class HousekeeperRuntimeService {
         switch (request.method, request.path) {
         case ("GET", "/housekeeper/health"):
             return healthResponse()
+        case ("GET", "/housekeeper/self-check"):
+            return selfCheckResponse(requestID: request.headers["x-request-id"]?.trimmedNonEmpty)
         case ("POST", "/housekeeper/execute"):
             return await executeResponse(for: request)
         default:
@@ -254,6 +256,22 @@ final class HousekeeperRuntimeService {
             startedAt: startedAt
         )
         return jsonResponse(statusCode: 200, payload: payload)
+    }
+
+    private func selfCheckResponse(requestID: String?) -> HTTPResponse {
+        let report = HousekeeperAgentLoopService.selfCheckReport()
+        var response = jsonResponse(
+            statusCode: report.ok ? 200 : 500,
+            payload: HousekeeperSelfCheckPayload(
+                ok: report.ok,
+                generatedAt: report.generatedAt,
+                checks: report.entries
+            )
+        )
+        if let requestID {
+            response.headers["X-Request-ID"] = requestID
+        }
+        return response
     }
 
     private func executeResponse(for request: HTTPRequest) async -> HTTPResponse {
@@ -696,6 +714,7 @@ final class HousekeeperRuntimeService {
         AgentPlannerContext(
             now: .now,
             currentMemberName: currentMember?.displayName,
+            currentMemberUsername: currentMember?.username,
             itemNames: snapshot.items.map(\.name),
             locationNames: snapshot.locations.map(\.name),
             eventTitles: snapshot.events.map(\.title),
@@ -1005,6 +1024,12 @@ private struct HousekeeperHealthPayload: Codable {
     var role: String
     var port: Int
     var startedAt: Date?
+}
+
+private struct HousekeeperSelfCheckPayload: Codable {
+    var ok: Bool
+    var generatedAt: Date
+    var checks: [HousekeeperLoopSelfCheckEntry]
 }
 
 private struct RuntimeDataSnapshot {

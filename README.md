@@ -55,6 +55,14 @@ Blab 是一个 macOS 原生本地应用（Swift + SwiftUI + SwiftData），本�
 
 工具目前是“应用内本地工具”，不直接暴露给外部。
 
+现在工具定义采用**单一注册表**（`LoopTool`）驱动：
+
+- prompt 中的 tool schema 自动由注册表生成
+- 决策参数校验由同一注册表生成
+- 执行分发由同一注册表分发
+
+这样新增/删除工具不会再出现 prompt/执行器漂移。
+
 ### 2.3 循环守卫
 
 - 最大轮次：默认 6 轮
@@ -62,6 +70,12 @@ Blab 是一个 macOS 原生本地应用（Swift + SwiftUI + SwiftData），本�
 - 无进展兜底：达到最大轮次后进入兜底规划
 - 决策修复：当模型输出非法 JSON 时，会自动发起一次“修复决策”重试
 - 参数自纠：工具参数缺失不会中断流程，而是写入观察并让模型下一轮自主改路
+
+### 2.4 保姆说明书（项目级）
+
+- 新增项目级规范文件：`HOUSEKEEPER_PLAYBOOK.md`
+- Loop 与 Planner 的系统提示统一注入该规范（`HousekeeperPromptGuide`）
+- 目标是把“角色边界 + 决策顺序 + 输出约束”固定化，减少模型自由发挥导致的失稳
 
 ## 3. 计划与执行能力
 
@@ -115,6 +129,7 @@ Blab 是一个 macOS 原生本地应用（Swift + SwiftUI + SwiftData），本�
 ### 5.2 接口
 
 - `GET /housekeeper/health`
+- `GET /housekeeper/self-check`
 - `POST /housekeeper/execute`
 
 ### 5.3 请求体
@@ -149,6 +164,16 @@ Blab 是一个 macOS 原生本地应用（Swift + SwiftUI + SwiftData），本�
 - `X-Request-ID`：链路追踪 ID
 - `Authorization: Bearer <token>`（若设置 `BLAB_HOUSEKEEPER_TOKEN`）
 
+### 5.7 自检守卫
+
+`GET /housekeeper/self-check` 会执行内置守卫检查（不依赖外部 LLM）：
+
+- 决策 JSON 解析（直出 / fenced / 嵌入块 / 非法拒绝）
+- 循环守卫（重复工具拦截、最大轮次兜底）
+- 工具注册表一致性（schema / 校验 / 分发元信息）
+
+当任一检查失败时，接口返回 `HTTP 500` 且 `ok=false`，可直接接入 CI 或本地 preflight。
+
 ## 6. 使用示例
 
 ### 6.1 健康检查
@@ -172,6 +197,7 @@ curl -s -X POST http://127.0.0.1:48765/housekeeper/execute \
 可直接使用：
 
 - `scripts/openclaw_housekeeper_client.py`
+- `scripts/run_housekeeper_self_check.py`
 
 能力：
 
@@ -182,6 +208,7 @@ curl -s -X POST http://127.0.0.1:48765/housekeeper/execute \
 - 可选交互追问重试（`--interactive-clarification`，自然语言补充后自动续跑）
 - 可选输出 Agent 统计（`--show-agent-stats`）
 - 可选输出目标校验摘要（`--show-verification`）
+- 可选执行 Loop 自检守卫（`run_housekeeper_self_check.py`，失败自动返回非 0）
 
 ## 8. 一键构建 DMG
 
@@ -243,7 +270,7 @@ curl -s -X POST http://127.0.0.1:48765/housekeeper/execute \
 
 - [ ] Runtime 增加结构化 metrics（每轮耗时、工具调用次数、失败分布）
 - [ ] 提供 debug 开关：导出完整决策快照
-- [ ] 提供“高风险动作审批模式”（删除前二次确认策略）
+- [ ] Hooks事件出发，提供“高风险动作审批模式”（删除前二次确认策略）
 
 ## 11. 关键事实与边界
 

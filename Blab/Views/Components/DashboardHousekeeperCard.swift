@@ -329,6 +329,7 @@ struct DashboardHousekeeperCard: View {
         let context = AgentPlannerContext(
             now: .now,
             currentMemberName: currentMember?.displayName,
+            currentMemberUsername: currentMember?.username,
             itemNames: items.map(\.name),
             locationNames: locations.map(\.name),
             eventTitles: events.map(\.title),
@@ -443,6 +444,7 @@ struct DashboardHousekeeperCard: View {
                     let context = AgentPlannerContext(
                         now: .now,
                         currentMemberName: currentMember?.displayName,
+                        currentMemberUsername: currentMember?.username,
                         itemNames: runtimeSnapshot.items.map(\.name),
                         locationNames: runtimeSnapshot.locations.map(\.name),
                         eventTitles: runtimeSnapshot.events.map(\.title),
