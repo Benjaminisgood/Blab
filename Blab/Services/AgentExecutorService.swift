@@ -171,8 +171,6 @@ enum AgentExecutorService {
                 throw executionError("新增物品必须提供 item.name。")
             }
             let target = LabItem(name: name)
-            modelContext.insert(target)
-            items.append(target)
 
             try patchItem(
                 target: target,
@@ -181,6 +179,9 @@ enum AgentExecutorService {
                 locations: locations,
                 members: members
             )
+
+            modelContext.insert(target)
+            items.append(target)
 
             modelContext.insert(
                 LabLog(
@@ -389,8 +390,6 @@ enum AgentExecutorService {
                 throw executionError("新增空间必须提供 location.name。")
             }
             let target = LabLocation(name: name)
-            modelContext.insert(target)
-            locations.append(target)
 
             try patchLocation(
                 target: target,
@@ -399,6 +398,9 @@ enum AgentExecutorService {
                 allLocations: locations,
                 members: members
             )
+
+            modelContext.insert(target)
+            locations.append(target)
 
             modelContext.insert(
                 LabLog(
@@ -622,8 +624,6 @@ enum AgentExecutorService {
             }
 
             let target = LabEvent(title: title, owner: owner)
-            modelContext.insert(target)
-            events.append(target)
 
             try patchEvent(
                 target: target,
@@ -634,6 +634,9 @@ enum AgentExecutorService {
                 locations: locations,
                 members: members
             )
+
+            modelContext.insert(target)
+            events.append(target)
 
             modelContext.insert(
                 LabLog(
@@ -930,12 +933,13 @@ enum AgentExecutorService {
             let username = makeAvailableUsername(from: preferredUsername, in: members)
 
             let target = Member(name: name, username: username)
-            modelContext.insert(target)
-            members.append(target)
 
             var patchedFields = fields
             patchedFields.username = username
-            try patchMember(target: target, fields: patchedFields, allMembers: members)
+            try patchMember(target: target, fields: patchedFields, allMembers: members + [target])
+
+            modelContext.insert(target)
+            members.append(target)
 
             modelContext.insert(
                 LabLog(

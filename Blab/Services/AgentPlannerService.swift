@@ -369,7 +369,7 @@ enum AgentPlannerService {
         )
         let plan = try decodePlan(from: rawReply)
         let normalized = normalizePlan(plan)
-        let guarded = applyPlanGuard(normalized)
+        let guarded = applyPlanGuard(normalized, context: context)
 
         if guarded.operations.isEmpty,
            guarded.clarification?.trimmedNonEmpty == nil {
@@ -412,7 +412,7 @@ enum AgentPlannerService {
         )
         let repaired = try decodePlan(from: rawReply)
         let normalized = normalizePlan(repaired)
-        let guarded = applyPlanGuard(normalized)
+        let guarded = applyPlanGuard(normalized, context: context)
 
         if guarded.operations.isEmpty,
            guarded.clarification?.trimmedNonEmpty == nil {
@@ -468,7 +468,12 @@ enum AgentPlannerService {
    - event.visibility：\(visibilityValues)
 8) 日期时间字段请用 ISO8601（例如 2026-02-22T15:00:00+08:00）。
    - 如用户说“今天/明天/后天/下周一”等相对时间，请先换算为绝对日期时间再输出。
-9) 若用户描述不足以安全执行，operations 可以为空，并在 clarification 给出一句追问。
+9) 新增关键字段约束：
+   - 新增物品必须明确 item.feature（公共/私人）。
+   - 新增空间必须明确 location.isPublic（true/false）。
+   - 若新增私人物品且未给 item.responsibleMemberNames：若上下文存在 currentMember，可默认使用 currentMember；否则必须 clarification 追问负责人。
+   - 若新增私人空间且未给 location.responsibleMemberNames：若上下文存在 currentMember，可默认使用 currentMember；否则必须 clarification 追问负责人。
+10) 若用户描述不足以安全执行，operations 可以为空，并在 clarification 给出一句追问。
 
 当前数据上下文（供匹配已有记录）：
 \(contextJSON)
@@ -507,6 +512,8 @@ enum AgentPlannerService {
    - 若 action=delete，可仅提供 target 并省略对应实体对象。
 3) create 必须提供基础名称字段；update 必须能定位目标。
    - delete 若为批量删除，可用 target.name="__ALL__"（或同义词“所有/全部/all/*”）。
+   - create item 必须明确 item.feature（公共/私人）；create location 必须明确 location.isPublic（true/false）。
+   - create 私人物品/私人空间若缺负责人且上下文无 currentMember，必须用 clarification 追问负责人。
 4) 若信息仍不足，operations 置空，并在 clarification 明确指出缺什么。
 5) 请优先修复 failedEntries 对应问题，不要重复已经成功的写入动作。
 
@@ -653,8 +660,8 @@ enum AgentPlannerService {
         return updated
     }
 
-    private static func applyPlanGuard(_ plan: AgentPlan) -> AgentPlan {
-        let issues = validateOperations(plan.operations)
+    private static func applyPlanGuard(_ plan: AgentPlan, context: AgentPlannerContext) -> AgentPlan {
+        let issues = validateOperations(plan.operations, context: context)
         guard !issues.isEmpty else { return plan }
 
         let issueLines = issues
@@ -673,7 +680,7 @@ enum AgentPlannerService {
         )
     }
 
-    private static func validateOperations(_ operations: [AgentOperation]) -> [String] {
+    private static func validateOperations(_ operations: [AgentOperation], context: AgentPlannerContext) -> [String] {
         operations.enumerated().compactMap { index, operation in
             let prefix = "第\(index + 1)条（\(operation.actionDisplayText)\(operation.entityDisplayText)）"
 
@@ -709,6 +716,14 @@ enum AgentPlannerService {
                     if operation.item?.name?.trimmedNonEmpty == nil {
                         return "\(prefix)缺少 item.name。"
                     }
+                    guard let feature = parseItemFeatureToken(operation.item?.feature) else {
+                        return "\(prefix)缺少或无法识别 item.feature（公共/私人）。"
+                    }
+                    if feature == .private,
+                       !hasNonEmptyTokens(operation.item?.responsibleMemberNames),
+                       !context.hasCurrentMember {
+                        return "\(prefix)私人物品缺少负责人，且当前成员不可用。"
+                    }
                 case .update:
                     if !operation.target.hasLocator,
                        operation.item?.name?.trimmedNonEmpty == nil {
@@ -728,6 +743,14 @@ enum AgentPlannerService {
                 case .create:
                     if operation.location?.name?.trimmedNonEmpty == nil {
                         return "\(prefix)缺少 location.name。"
+                    }
+                    guard let isPublic = operation.location?.isPublic else {
+                        return "\(prefix)缺少 location.isPublic（true/false）。"
+                    }
+                    if !isPublic,
+                       !hasNonEmptyTokens(operation.location?.responsibleMemberNames),
+                       !context.hasCurrentMember {
+                        return "\(prefix)私人空间缺少负责人，且当前成员不可用。"
                     }
                 case .update:
                     if !operation.target.hasLocator,
@@ -812,6 +835,26 @@ enum AgentPlannerService {
         "__all__", "*", "all", "everything", "所有", "全部", "全体", "全都", "清空"
     ]
 
+    private static func parseItemFeatureToken(_ token: String?) -> ItemFeature? {
+        guard let token = token?.trimmedNonEmpty else { return nil }
+        let normalized = token
+            .folding(options: [.diacriticInsensitive, .widthInsensitive, .caseInsensitive], locale: .current)
+            .lowercased()
+            .replacingOccurrences(of: #"\s+"#, with: "", options: .regularExpression)
+        switch normalized {
+        case "public", "common", "公开", "公共":
+            return .public
+        case "private", "personal", "私有", "私人":
+            return .private
+        default:
+            return nil
+        }
+    }
+
+    private static func hasNonEmptyTokens(_ tokens: [String]?) -> Bool {
+        tokens?.contains(where: { $0.trimmedNonEmpty != nil }) == true
+    }
+
     private static func plannerError(_ message: String) -> NSError {
         NSError(
             domain: "AgentPlannerService",
@@ -839,6 +882,12 @@ private extension AgentTarget? {
         return target.id?.trimmedNonEmpty != nil
             || target.name?.trimmedNonEmpty != nil
             || target.username?.trimmedNonEmpty != nil
+    }
+}
+
+private extension AgentPlannerContext {
+    var hasCurrentMember: Bool {
+        currentMemberName?.trimmedNonEmpty != nil || currentMemberUsername?.trimmedNonEmpty != nil
     }
 }
 

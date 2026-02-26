@@ -219,6 +219,12 @@ final class LabItem {
 
     func canEdit(_ member: Member?) -> Bool {
         if feature == .private {
+            guard member != nil else { return false }
+            if responsibleMembers.isEmpty {
+                // Recovery path: legacy invalid private items without responsible members
+                // should remain operable for the active member.
+                return true
+            }
             return isResponsible(member)
         }
         return true
