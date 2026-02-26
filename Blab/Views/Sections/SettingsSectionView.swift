@@ -5,10 +5,7 @@ import Combine
 
 struct SettingsSectionView: View {
     @Environment(\.modelContext) private var modelContext
-    @Query(sort: [SortDescriptor(\Member.name), SortDescriptor(\Member.username)]) private var members: [Member]
     @Query(filter: #Predicate<AISettings> { $0.key == "default" }, sort: [SortDescriptor(\AISettings.updatedAt, order: .reverse)]) private var aiSettingsList: [AISettings]
-
-    @Binding var currentMemberID: String
 
     @State private var aiTestPrompt = "请用一句话介绍 Blab 的用途。"
     @State private var aiTestResult = ""
@@ -21,46 +18,14 @@ struct SettingsSectionView: View {
         aiSettingsList.first
     }
 
-    private var currentMember: Member? {
-        members.first(where: { $0.id.uuidString == currentMemberID })
-    }
-
     var body: some View {
         NavigationStack {
             EditorCanvas(maxWidth: 1040) {
                 EditorHeader(
                     title: "系统设置",
-                    subtitle: "管理当前权限视角、本地存储与 AI 接入能力。",
+                    subtitle: "管理本地存储与 AI 接入能力。",
                     systemImage: "slider.horizontal.3"
                 )
-
-                EditorCard(
-                    title: "当前成员视角",
-                    subtitle: "用于权限判断和界面展示",
-                    systemImage: "person.crop.circle.fill"
-                ) {
-                    if members.isEmpty {
-                        Text("暂无成员，请先在成员页创建。")
-                            .foregroundStyle(.secondary)
-                    } else {
-                        Picker("活动成员", selection: $currentMemberID) {
-                            ForEach(members) { member in
-                                Text(member.displayName).tag(member.id.uuidString)
-                            }
-                        }
-                        .pickerStyle(.menu)
-
-                        if let currentMember {
-                            Text("当前权限视角：@\(currentMember.username)")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        } else {
-                            Text("请选择一个成员以启用权限判断。")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                }
 
                 EditorCard(
                     title: "本地存储",
@@ -219,7 +184,6 @@ struct SettingsSectionView: View {
             }
             .navigationTitle("设置")
             .onAppear {
-                ensureCurrentMemberSelected()
                 ensureAISettingsExists()
                 refreshRuntimeSnapshot()
             }
@@ -277,13 +241,6 @@ struct SettingsSectionView: View {
             NSWorkspace.shared.activateFileViewerSelecting(targets)
         } else if let appSupportDirectory {
             NSWorkspace.shared.open(appSupportDirectory)
-        }
-    }
-
-    private func ensureCurrentMemberSelected() {
-        guard !members.isEmpty else { return }
-        if members.first(where: { $0.id.uuidString == currentMemberID }) == nil {
-            currentMemberID = members[0].id.uuidString
         }
     }
 

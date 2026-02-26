@@ -20,6 +20,10 @@ struct ContentView: View {
         members.first(where: { $0.id.uuidString == currentMemberID }) ?? members.first
     }
 
+    private var memberIDsFingerprint: String {
+        members.map { $0.id.uuidString }.joined(separator: "|")
+    }
+
     private var alertFingerprint: String {
         let itemTokens = items.compactMap { item -> String? in
             guard let status = item.status, status.isAlert else { return nil }
@@ -59,11 +63,27 @@ struct ContentView: View {
                         Text("Blab")
                             .font(.caption.weight(.semibold))
                     }
-                    Text(currentMember?.displayName ?? "未选择成员")
-                        .font(.subheadline.weight(.semibold))
-                    Text(currentMember?.username.isEmpty == false ? "@\(currentMember!.username)" : "")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                    if members.isEmpty {
+                        Text("暂无成员，请先在成员页创建。")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        Text(currentMember?.displayName ?? "未选择成员")
+                            .font(.subheadline.weight(.semibold))
+
+                        Picker("活动成员", selection: $currentMemberID) {
+                            ForEach(members) { member in
+                                Text(member.displayName).tag(member.id.uuidString)
+                            }
+                        }
+                        .pickerStyle(.menu)
+
+                        if let currentMember, !currentMember.username.isEmpty {
+                            Text("@\(currentMember.username)")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
                 }
                 .padding(.horizontal, 14)
                 .padding(.vertical, 10)
@@ -84,7 +104,7 @@ struct ContentView: View {
                 case .logs:
                     LogsSectionView()
                 case .settings:
-                    SettingsSectionView(currentMemberID: $currentMemberID)
+                    SettingsSectionView()
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -92,11 +112,11 @@ struct ContentView: View {
         }
         .task {
             SeedDataService.bootstrapIfNeeded(context: modelContext)
-            if members.first(where: { $0.id.uuidString == currentMemberID }) == nil,
-               let firstMember = members.first {
-                currentMemberID = firstMember.id.uuidString
-            }
+            ensureCurrentMemberSelected()
             refreshAlertNotifications()
+        }
+        .onChange(of: memberIDsFingerprint) { _, _ in
+            ensureCurrentMemberSelected()
         }
         .onChange(of: alertFingerprint) { _, _ in
             refreshAlertNotifications()
@@ -111,6 +131,17 @@ struct ContentView: View {
             items: items,
             locations: locations
         )
+    }
+
+    private func ensureCurrentMemberSelected() {
+        guard let firstMember = members.first else {
+            currentMemberID = ""
+            return
+        }
+
+        if members.first(where: { $0.id.uuidString == currentMemberID }) == nil {
+            currentMemberID = firstMember.id.uuidString
+        }
     }
 
     private func handleAlertNotificationTap(_ userInfo: [AnyHashable: Any]?) {
