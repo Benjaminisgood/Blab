@@ -5,6 +5,11 @@ struct AttachmentStore {
     static let attachmentsFolder = "attachments"
 
     static func appSupportDirectory() throws -> URL {
+        if AppPersistence.isPreview {
+            let preview = FileManager.default.temporaryDirectory.appendingPathComponent("Blab-Preview", isDirectory: true)
+            try FileManager.default.createDirectory(at: preview, withIntermediateDirectories: true)
+            return preview
+        }
         let base = try FileManager.default.url(
             for: .applicationSupportDirectory,
             in: .userDomainMask,

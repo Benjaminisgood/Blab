@@ -2,6 +2,7 @@ import Foundation
 
 enum SidebarSection: String, CaseIterable, Identifiable {
     case dashboard
+    case wardrobe
     case events
     case items
     case locations
@@ -14,7 +15,9 @@ enum SidebarSection: String, CaseIterable, Identifiable {
     var title: String {
         switch self {
         case .dashboard:
-            return "总览"
+            return "今日生活"
+        case .wardrobe:
+            return "衣橱与穿搭"
         case .events:
             return "事项"
         case .items:
@@ -34,6 +37,8 @@ enum SidebarSection: String, CaseIterable, Identifiable {
         switch self {
         case .dashboard:
             return "square.grid.2x2"
+        case .wardrobe:
+            return "tshirt"
         case .events:
             return "calendar"
         case .items:

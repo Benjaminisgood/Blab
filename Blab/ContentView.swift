@@ -125,7 +125,10 @@ struct ContentView: View {
             Group {
                 switch selectedSection ?? .dashboard {
                 case .dashboard:
-                    DashboardSectionView(currentMember: currentMember)
+                    DashboardSectionView(currentMember: currentMember) { selectedSection = $0 }
+                case .wardrobe:
+                    WardrobeSectionView(currentMember: currentMember)
+                        .id(currentMember?.id)
                 case .events:
                     EventsSectionView(currentMember: currentMember)
                 case .items:
@@ -144,7 +147,11 @@ struct ContentView: View {
             .background(.background)
         }
         .task {
-            SeedDataService.bootstrapIfNeeded(context: modelContext)
+            if AppPersistence.isPreview {
+                PreviewDataService.populate(context: modelContext)
+            } else {
+                SeedDataService.bootstrapIfNeeded(context: modelContext)
+            }
             ensureCurrentMemberSelected()
             refreshAlertNotifications()
         }
@@ -160,6 +167,7 @@ struct ContentView: View {
     }
 
     private func refreshAlertNotifications() {
+        guard !AppPersistence.isPreview else { return }
         AlertNotificationService.shared.refresh(
             items: items,
             locations: locations
@@ -207,6 +215,8 @@ struct ContentView: View {
             LabAttachment.self,
             LabLog.self,
             LabMessage.self,
-            AISettings.self
+            AISettings.self,
+            WardrobeGarment.self,
+            OutfitRecord.self
         ], inMemory: true)
 }

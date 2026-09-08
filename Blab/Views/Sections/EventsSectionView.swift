@@ -34,8 +34,10 @@ struct EventsSectionView: View {
     private var upcomingEvents: [LabEvent] {
         let now = Date.now
         return filteredEvents.filter { event in
-            guard let start = event.startTime else { return true }
-            return start >= now
+            // An event remains current until its end, including when it began
+            // earlier. A deadline-only event follows the same partition.
+            guard let lastDate = event.endTime ?? event.startTime else { return true }
+            return lastDate >= now
         }
     }
 

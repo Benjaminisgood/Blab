@@ -8,22 +8,11 @@ struct BlabApp: App {
     @NSApplicationDelegateAdaptor(BlabNotificationDelegate.self) private var notificationDelegate
 
     private var sharedModelContainer: ModelContainer = {
-        let schema = Schema([
-            Member.self,
-            MemberFollow.self,
-            LabItem.self,
-            LabLocation.self,
-            EventParticipant.self,
-            LabEvent.self,
-            LabAttachment.self,
-            LabLog.self,
-            LabMessage.self,
-            AISettings.self
-        ])
+        let schema = AppPersistence.schema
 
         let configuration = ModelConfiguration(
             schema: schema,
-            isStoredInMemoryOnly: false,
+            isStoredInMemoryOnly: AppPersistence.isPreview,
             allowsSave: true
         )
 
@@ -35,14 +24,19 @@ struct BlabApp: App {
     }()
 
     init() {
-        HousekeeperRuntimeService.shared.startIfNeeded(modelContainer: sharedModelContainer)
+        if !AppPersistence.isPreview {
+            HousekeeperRuntimeService.shared.startIfNeeded(modelContainer: sharedModelContainer)
+        }
     }
 
     var body: some Scene {
         WindowGroup {
             ContentView()
+                .frame(minWidth: 960, minHeight: 640)
+                .defaultAppStorage(AppPersistence.preferences)
         }
         .modelContainer(sharedModelContainer)
+        .defaultSize(width: 1240, height: 820)
         .commands {
             SidebarCommands()
         }

@@ -8,6 +8,22 @@ struct DashboardSectionView: View {
     @Query(sort: [SortDescriptor(\Member.name)]) private var members: [Member]
 
     let currentMember: Member?
+    var onNavigate: (SidebarSection) -> Void = { _ in }
+
+    private var personalSchedule: [LifeScheduleEntry] {
+        guard let currentMember else { return [] }
+        return accessibleEvents.filter { event in
+            event.owner?.id == currentMember.id || event.isParticipant(currentMember)
+        }.map { event in
+            LifeScheduleEntry(
+                id: event.id,
+                title: event.title,
+                start: event.startTime,
+                end: event.endTime,
+                location: event.locations.map(\.name).joined(separator: "、")
+            )
+        }
+    }
 
     private var accessibleEvents: [LabEvent] {
         events.filter { $0.canView(currentMember) }
@@ -56,7 +72,15 @@ struct DashboardSectionView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
-                DashboardHeroCard(currentMemberName: currentMember?.displayName ?? "未选择成员")
+                TodayOverviewCard(
+                    currentMemberName: currentMember?.displayName,
+                    entries: personalSchedule,
+                    onNavigate: onNavigate
+                )
+
+                Text("资料与提醒")
+                    .font(.title3.weight(.semibold))
+                    .padding(.top, 8)
 
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 170), spacing: 12)], spacing: 12) {
                     SummaryCard(
@@ -89,13 +113,21 @@ struct DashboardSectionView: View {
                     )
                 }
 
-                DashboardHousekeeperCard(
-                    currentMember: currentMember,
-                    items: items,
-                    locations: locations,
-                    events: events,
-                    members: members
-                )
+                DisclosureGroup {
+                    DashboardHousekeeperCard(
+                        currentMember: currentMember,
+                        items: items,
+                        locations: locations,
+                        events: events,
+                        members: members
+                    )
+                    .padding(.top, 10)
+                } label: {
+                    Label("智能生活助手", systemImage: "sparkles")
+                        .font(.headline)
+                }
+                .padding(16)
+                .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 14))
 
                 if !itemAlerts.isEmpty {
                     EditorCard(
@@ -223,44 +255,6 @@ struct DashboardSectionView: View {
             object: nil,
             userInfo: route.userInfo
         )
-    }
-}
-
-private struct DashboardHeroCard: View {
-    var currentMemberName: String
-
-    var body: some View {
-        HStack(alignment: .top, spacing: 12) {
-            Image(systemName: "waveform.path.ecg.rectangle.fill")
-                .font(.title2.weight(.semibold))
-                .foregroundStyle(Color.accentColor)
-                .frame(width: 40, height: 40)
-                .background(Color.accentColor.opacity(0.14))
-                .clipShape(RoundedRectangle(cornerRadius: 12))
-
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Blab 控制台")
-                    .font(.title2.weight(.bold))
-                Text("当前成员：\(currentMemberName)")
-                    .foregroundStyle(.secondary)
-                    .font(.subheadline)
-            }
-
-            Spacer()
-        }
-        .padding(16)
-        .background(
-            LinearGradient(
-                colors: [Color.accentColor.opacity(0.16), Color.secondary.opacity(0.08)],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
-            )
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .strokeBorder(Color.secondary.opacity(0.18))
-        )
-        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
     }
 }
 
